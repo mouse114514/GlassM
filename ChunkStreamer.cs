@@ -39,11 +39,61 @@ public static class ChunkStreamer
 	public static readonly bool[,] genData = new bool[16, 16]; // worldBlocks 数据已生成
 	static readonly bool[,] colliderOn = new bool[16, 16];     // collider 当前状态
 	static readonly bool[,] inQueue = new bool[16, 16];        // 该块是否已在生成队列(避免 List.Contains O(n))
+	static readonly bool[,] genFull = new bool[16, 16];        // 该块需完整生成(地形+矿石+液体+实体)
+	static readonly bool[,] genApplied = new bool[16, 16];     // 地形已后台算完并已应用
+	static readonly bool[,] dirtyRender = new bool[16, 16];    // 远处跳过的渲染,回到近处需补渲
 	static readonly List<Vector2Int> queue = new List<Vector2Int>();
 	static readonly List<Vector2Int> pendingFull = new List<Vector2Int>(); // 初始只生成地形的块,待补实体/矿物/液体
 
 	// 渲染复用数组(RenderChunk 每帧多次调用,避免反复分配)
 	static readonly TileBase[] renderTiles = new TileBase[CS * CS];
+
+	// 后台地形线程:噪声计算(~11ms/块)移出主线程。
+	// 后台线程独占 terrainRng 和全部地形噪声实例(FastNoiseLite);
+	// 主线程不碰它们,只从完成队列取回临时数组写回 WB + 渲染/结构/实体。
+	static readonly object terrLock = new object();
+	static readonly Queue<Vector2Int> terrJobs = new Queue<Vector2Int>();
+	static readonly Queue<KeyValuePair<Vector2Int, ushort[,]>> terrDone = new Queue<KeyValuePair<Vector2Int, ushort[,]>>();
+	static System.Threading.Thread terrThread;
+	static volatile bool terrStop;
+	static void EnsureTerrainThread()
+	{
+		if (terrThread != null) return;
+		terrStop = false; // 常驻后台线程,仅层切换时由 OnClear 清队列
+		terrThread = new System.Threading.Thread(TerrainWorkerLoop);
+		terrThread.IsBackground = true;
+		terrThread.Start();
+	}
+	static void TerrainWorkerLoop()
+	{
+		while (!terrStop)
+		{
+			Vector2Int c = default;
+			bool has;
+			lock (terrLock)
+			{
+				has = terrJobs.Count > 0;
+				if (has) c = terrJobs.Dequeue();
+			}
+			if (!has)
+			{
+				System.Threading.Thread.Sleep(1);
+				continue;
+			}
+			var data = new ushort[CS, CS];
+			try
+			{
+				GenChunkTerrainInto(c, data);
+			}
+			catch (Exception e)
+			{
+				Plugin.Log.LogWarning("terrain worker failed " + c + ": " + e);
+				lock (terrLock) terrDone.Enqueue(new KeyValuePair<Vector2Int, ushort[,]>(c, data));
+				continue;
+			}
+			lock (terrLock) terrDone.Enqueue(new KeyValuePair<Vector2Int, ushort[,]>(c, data));
+		}
+	}
 
 	// 结构资源缓存(Resources.Load 结果,避免每块重复加载)
 	static readonly Dictionary<string, GameObject> structRes = new Dictionary<string, GameObject>();
@@ -66,6 +116,18 @@ public static class ChunkStreamer
 		return go;
 	}
 
+	// 诊断:单块应用耗时统计(主线程 ApplyChunk)
+	static long diagApplyMs, diagRenderMs, diagStructMs, diagRefreshMs, diagOreMs;
+	static int diagApplyCount;
+
+	// 地形用独立随机源(原版用 UnityEngine.Random;为了后续可后台线程化,
+	// 先切换为 System.Random,观感不变)。种子固定保证每次进图一致。
+	static readonly System.Random terrainRng = new System.Random(12345);
+	// UnityEngine.Random.Range(0,1) -> System.Random 等价
+	static float R(float min, float max) => (float)(min + (max - min) * terrainRng.NextDouble());
+	static float RV() => (float)terrainRng.NextDouble();
+	static int RI(int min, int max) => terrainRng.Next(min, max);
+
 	// 调度参数
 	public const int GEN_RADIUS = 5;     // 生成半径(区块),11x11
 	public const int UNLOAD_RADIUS = 7;  // 卸载半径(区块),超出关闭 collider
@@ -74,6 +136,9 @@ public static class ChunkStreamer
 
 	public static Vector2Int PlayerChunk = new Vector2Int(8, 8);
 	static Vector2Int lastScanChunk = new Vector2Int(int.MinValue, int.MinValue); // 上次卸载扫描的玩家块
+	static Vector2Int lastEnqueueChunk = new Vector2Int(int.MinValue, int.MinValue); // 上次入队扫描的玩家块
+	static Vector2Int lastPlayerChunk;  // 用于计算移动方向
+	static Vector2Int moveDir;          // 玩家移动方向(块坐标差分,单位化)
 	public static int QueueCount => queue.Count;
 	static float nextLogTime;
 
@@ -85,6 +150,9 @@ public static class ChunkStreamer
 		Array.Clear(genData, 0, genData.Length);
 		Array.Clear(colliderOn, 0, colliderOn.Length);
 		Array.Clear(inQueue, 0, inQueue.Length);
+		Array.Clear(genFull, 0, genFull.Length);
+		Array.Clear(genApplied, 0, genApplied.Length);
+		Array.Clear(dirtyRender, 0, dirtyRender.Length);
 		queue.Clear();
 	}
 
@@ -93,8 +161,17 @@ public static class ChunkStreamer
 		Array.Clear(genData, 0, genData.Length);
 		Array.Clear(colliderOn, 0, colliderOn.Length);
 		Array.Clear(inQueue, 0, inQueue.Length);
+		Array.Clear(genFull, 0, genFull.Length);
+		Array.Clear(genApplied, 0, genApplied.Length);
+		Array.Clear(dirtyRender, 0, dirtyRender.Length);
 		queue.Clear();
 		pendingFull.Clear();
+		// 后台地形线程常驻(background,空闲时 sleep);仅清空队列,新世界继续复用
+		lock (terrLock)
+		{
+			terrJobs.Clear();
+			terrDone.Clear();
+		}
 	}
 
 	static bool InWorld(Vector2Int c) => c.x >= 0 && c.y >= 0 && c.x < 16 && c.y < 16;
@@ -218,11 +295,7 @@ public static class ChunkStreamer
 		int cy = 1011 / CS;                 // 块 15
 		for (int cx = cx0; cx <= cx1; cx++)
 		{
-			if (!genData[cx, cy])
-			{
-				GenChunk(new Vector2Int(cx, cy), false);
-				pendingFull.Add(new Vector2Int(cx, cy));
-			}
+			SyncGenAndWait(new Vector2Int(cx, cy));
 		}
 		for (int x = 508; x <= 516; x++)
 		{
@@ -248,8 +321,49 @@ public static class ChunkStreamer
 			{
 				Vector2Int cc = new Vector2Int(x, y);
 				if (!InWorld(cc) || genData[cc.x, cc.y]) continue;
-				if (genNow) GenChunk(cc, false);
+				if (genNow)
+				{
+					// 出生时同步生成(提交后台+等待),保证出生点就绪
+					if (!genApplied[cc.x, cc.y]) SyncGenAndWait(cc);
+				}
 				else { queue.Add(cc); inQueue[cc.x, cc.y] = true; }
+			}
+		}
+	}
+
+	// 同步:提交一块地形到后台并阻塞等待它算完应用(出生流程专用)
+	static void SyncGenAndWait(Vector2Int cc)
+	{
+		if (genData[cc.x, cc.y] || genApplied[cc.x, cc.y]) return;
+		genData[cc.x, cc.y] = true;
+		genFull[cc.x, cc.y] = false;
+		EnsureTerrainThread();
+			lock (terrLock) terrJobs.Enqueue(cc);
+		for (int w = 0; w < 200; w++)
+		{
+			KeyValuePair<Vector2Int, ushort[,]> item;
+			bool has;
+			lock (terrLock)
+			{
+				has = terrDone.Count > 0;
+				if (has) item = terrDone.Dequeue();
+				else item = default;
+			}
+			if (has)
+			{
+				if (item.Key == cc)
+				{
+					ApplyChunk(cc, item.Value);
+					pendingFull.Add(cc);
+					return;
+				}
+				// 不是目标块,先应用(也是我们的块)
+				ApplyChunk(item.Key, item.Value);
+				pendingFull.Add(item.Key);
+			}
+			else
+			{
+				System.Threading.Thread.Sleep(1);
 			}
 		}
 	}
@@ -264,22 +378,31 @@ public static class ChunkStreamer
 			Vector3 pos = WorldGeneration.world != null && PlayerCamera.main != null && PlayerCamera.main.body != null
 				? PlayerCamera.main.body.transform.position : Vector3.zero;
 			pc = new Vector2Int(Mathf.Clamp((int)(pos.x + 512f) / CS, 0, 15), Mathf.Clamp((int)(pos.y + 512f) / CS, 0, 15));
+			if (pc != lastPlayerChunk)
+			{
+				Vector2Int d = pc - lastPlayerChunk;
+				moveDir = new Vector2Int(d.x > 0 ? 1 : (d.x < 0 ? -1 : 0), d.y > 0 ? 1 : (d.y < 0 ? -1 : 0));
+				lastPlayerChunk = pc;
+			}
 			PlayerChunk = pc;
 		}
 		catch { }
-		// 新进入范围的区块入队
+		// 新进入范围的区块入队(仅玩家块变化时扫描,静止时跳过)
 		bool added = false;
-		if (StreamOn)
-		for (int x = pc.x - GEN_RADIUS; x <= pc.x + GEN_RADIUS; x++)
+		if (StreamOn && pc != lastEnqueueChunk)
 		{
-			for (int y = pc.y - GEN_RADIUS; y <= pc.y + GEN_RADIUS; y++)
+			lastEnqueueChunk = pc;
+			for (int x = pc.x - GEN_RADIUS; x <= pc.x + GEN_RADIUS; x++)
 			{
-				if (x < 0 || y < 0 || x > 15 || y > 15) continue;
-				if (!genData[x, y] && !inQueue[x, y])
+				for (int y = pc.y - GEN_RADIUS; y <= pc.y + GEN_RADIUS; y++)
 				{
-					queue.Add(new Vector2Int(x, y));
-					inQueue[x, y] = true;
-					added = true;
+					if (x < 0 || y < 0 || x > 15 || y > 15) continue;
+					if (!genData[x, y] && !inQueue[x, y])
+					{
+						queue.Add(new Vector2Int(x, y));
+						inQueue[x, y] = true;
+						added = true;
+					}
 				}
 			}
 		}
@@ -303,17 +426,19 @@ public static class ChunkStreamer
 				}
 			}
 		}
-		// 生成最近的新块
+		// 生成最近的新块(提交到后台地形线程),朝移动方向优先
 		if (queue.Count > 0)
 		{
-			if (added) queue.Sort((a, b) => Dist2(a, pc).CompareTo(Dist2(b, pc)));
+			if (added) queue.Sort((a, b) => GenPriority(a, pc).CompareTo(GenPriority(b, pc)));
 			int n = Mathf.Min(MAX_PER_FRAME, queue.Count);
 			for (int i = 0; i < n; i++)
 			{
-				GenChunk(queue[0]);
+				GenChunk(queue[0], true);
 				queue.RemoveAt(0);
 			}
 		}
+		// 应用后台已完成的地形(写回 WB + 渲染 + 结构 + 实体)
+		ApplyDoneChunks(MAX_PER_FRAME);
 		// 卸载:超出卸载半径的区块关闭 collider;回到半径内恢复。
 		// 仅玩家块变化时才扫描(静止时距离关系不变,结果必相同)
 		int unloadCount = 0;
@@ -335,6 +460,9 @@ public static class ChunkStreamer
 						col.enabled = !far;
 						colliderOn[x, y] = !far;
 						unloadCount++;
+						// 回到范围内时,补渲之前远处跳过的块
+						if (!far && dirtyRender[x, y])
+							RenderChunk(new Vector2Int(x, y));
 					}
 				}
 			}
@@ -344,7 +472,14 @@ public static class ChunkStreamer
 			nextLogTime = Time.unscaledTime + 5f;
 			int genCount = 0;
 			for (int x = 0; x < 16; x++) for (int y = 0; y < 16; y++) if (genData[x, y]) genCount++;
-			Plugin.Log.LogInfo("CS: generated " + genCount + "/256, queue " + queue.Count + ", collider toggles " + unloadCount);
+			string diag = "";
+			if (diagApplyCount > 0)
+			{
+				diag = string.Format(" | apply {0:N2}ms (ore {1:N2} render {2:N2} struct {3:N2} refresh {4:N2}, {5})",
+					diagApplyMs / (float)diagApplyCount, diagOreMs / (float)diagApplyCount, diagRenderMs / (float)diagApplyCount, diagStructMs / (float)diagApplyCount, diagRefreshMs / (float)diagApplyCount, diagApplyCount);
+				diagApplyMs = diagOreMs = diagRenderMs = diagStructMs = diagRefreshMs = 0; diagApplyCount = 0;
+			}
+			Plugin.Log.LogInfo("CS: generated " + genCount + "/256, queue " + queue.Count + ", collider toggles " + unloadCount + diag);
 		}
 	}
 
@@ -354,18 +489,43 @@ public static class ChunkStreamer
 		return dx * dx + dy * dy;
 	}
 
-	// ===== 区块生成:地形 + 矿物 + 液体 + 实体 =====
-	public static void GenChunk(Vector2Int c) => GenChunk(c, true);
+	// 生成优先级:欧氏距离 + 移动方向奖励(前方块优先)。
+	// 沿移动方向的块减权 16(约 4 格距离),减少"跑到新块才等生成"
+	static int GenPriority(Vector2Int a, Vector2Int b)
+	{
+		int dx = a.x - b.x, dy = a.y - b.y;
+		int d = dx * dx + dy * dy;
+		if (moveDir.x != 0 && dx != 0 && (dx > 0) == (moveDir.x > 0)) d -= 16;
+		if (moveDir.y != 0 && dy != 0 && (dy > 0) == (moveDir.y > 0)) d -= 16;
+		return d;
+	}
 
+	// ===== 区块生成:地形后台算 + 主线程应用 =====
+	// 提交地形到后台线程(异步),返回后主线程在 Tick 里 ApplyChunk 应用
 	static void GenChunk(Vector2Int c, bool full)
 	{
-		if (genData[c.x, c.y]) return;
+		if (genData[c.x, c.y] || genApplied[c.x, c.y]) return;
 		genData[c.x, c.y] = true;
+		genFull[c.x, c.y] = full;
 		inQueue[c.x, c.y] = false;
+		EnsureTerrainThread();
+		lock (terrLock) terrJobs.Enqueue(c);
+	}
+
+	// 主线程应用已完成地形:写回 WB + 矿石/液体/实体 + 渲染 + 结构
+	static void ApplyChunk(Vector2Int c, ushort[,] data)
+	{
+		if (genApplied[c.x, c.y]) return;
+		genApplied[c.x, c.y] = true;
+		var sw = System.Diagnostics.Stopwatch.StartNew();
 		try
 		{
-			GenChunkTerrain(c);
-			if (full)
+			int bx = c.x * CS, by = c.y * CS;
+			for (int i = 0; i < CS; i++)
+				for (int j = 0; j < CS; j++)
+					WB[bx + i, by + j] = data[i, j];
+			var swO = System.Diagnostics.Stopwatch.StartNew();
+			if (genFull[c.x, c.y])
 			{
 				GenChunkOres(c);
 				GenChunkLiquids(c);
@@ -375,13 +535,42 @@ public static class ChunkStreamer
 			{
 				pendingFull.Add(c);
 			}
+			diagOreMs += swO.ElapsedMilliseconds;
+			var swR = System.Diagnostics.Stopwatch.StartNew();
 			RenderChunk(c);
+			diagRenderMs += swR.ElapsedMilliseconds;
+			var swS = System.Diagnostics.Stopwatch.StartNew();
 			GenChunkStructures(c);
+			diagStructMs += swS.ElapsedMilliseconds;
+			var swF = System.Diagnostics.Stopwatch.StartNew();
 			RefreshAround(c);
+			diagRefreshMs += swF.ElapsedMilliseconds;
+			diagApplyMs += sw.ElapsedMilliseconds;
+			diagApplyCount++;
 		}
 		catch (Exception e)
 		{
-			Plugin.Log.LogWarning("chunk gen failed " + c + ": " + e);
+			Plugin.Log.LogWarning("chunk apply failed " + c + ": " + e);
+		}
+	}
+
+	// 从后台完成队列取回已算好的地形并应用
+	static void ApplyDoneChunks(int max)
+	{
+		int n = 0;
+		while (n < max)
+		{
+			KeyValuePair<Vector2Int, ushort[,]> item;
+			bool has;
+			lock (terrLock)
+			{
+				has = terrDone.Count > 0;
+				if (has) item = terrDone.Dequeue();
+				else item = default;
+			}
+			if (!has) break;
+			ApplyChunk(item.Key, item.Value);
+			n++;
 		}
 	}
 
@@ -391,6 +580,12 @@ static void RenderChunk(Vector2Int c)
 		if (tm == null) return;
 		int bx = c.x * CS, by = c.y * CS;
 		int half = W.HALFCHUNKSIZE;
+		// 远处区块(卸载半径外)跳过 Mesh 重建:数据在 WB,回到近处时补渲。
+		if (Dist2(c, PlayerChunk) > UNLOAD_RADIUS * UNLOAD_RADIUS)
+		{
+			dirtyRender[c.x, c.y] = true;
+			return;
+		}
 		// 按 row-major 填充(SetTilesBlock 比 SetTiles 快:直接写网格,
 		// 跳过 Unity 的 tile 缓存字典查找;要求数组覆盖整块、从 origin 起)
 		int idx = 0;
@@ -400,6 +595,7 @@ static void RenderChunk(Vector2Int c)
 				renderTiles[idx++] = W.tiles[WB[bx + i, by + j]];
 		}
 		tm.SetTilesBlock(new BoundsInt(-half, -half, 0, CS, CS, 1), renderTiles);
+		dirtyRender[c.x, c.y] = false;
 	}
 
 	// ===== 结构生成(照搬原版 WorldGenerateStructures/GenerateDropCapsules/
@@ -440,18 +636,15 @@ static void RenderChunk(Vector2Int c)
 	}
 
 	// 结构写入后刷新本块+已生成邻块(结构只写 worldBlocks,靠刷新显示)
+	// 结构写入后重渲染本块(结构只写 worldBlocks,靠刷新显示)。
+	// 注意:原版是全图 UpdateWorld 一次刷新;我们分块后,结构位置经
+	// RandPosInChunk 限制在块中心 ±22 内,基本不跨块边界,故只重渲染本块
+	// 即可(邻块几乎不被结构改到,省去 8/9 的整块 Mesh 重建)。
+	// 若结构确实跨边界(极少数),其边缘会在邻块自身 apply 时被刷新覆盖。
 	static void RefreshAround(Vector2Int c)
 	{
-		for (int dx = -1; dx <= 1; dx++)
-		{
-			for (int dy = -1; dy <= 1; dy++)
-			{
-				int x = c.x + dx, y = c.y + dy;
-				if (x < 0 || y < 0 || x > 15 || y > 15) continue;
-				if (!genData[x, y]) continue;
-				RenderChunk(new Vector2Int(x, y));
-			}
-		}
+		if (genData[c.x, c.y])
+			RenderChunk(c);
 	}
 
 	// 照搬原版 WorldGenerateStructures(按 biomeDepth 分层;原版结构密度与块无关)
@@ -697,10 +890,10 @@ static void RenderChunk(Vector2Int c)
 	}
 
 	// ===== 地形(照搬原版 WorldGenerateTerrain 循环,范围=区块) =====
-	static void GenChunkTerrain(Vector2Int c)
+	// 写入 dest 临时数组(由后台线程调用,不碰全局 WB)
+	static void GenChunkTerrainInto(Vector2Int c, ushort[,] wb)
 	{
 		int bx = c.x * CS, by = c.y * CS;
-		ushort[,] wb = WB;
 		if (biome <= 1)
 		{
 			for (int x = bx; x < bx + CS; x++)
@@ -712,22 +905,22 @@ static void RenderChunk(Vector2Int c)
 					float noise = dirtPerlin.GetNoise(x, y);
 					if (block > 0 && noise < -0.1f)
 						block = (ushort)(noise < -0.33f ? 16 : 2);
-					if (block > 0 && UnityEngine.Random.Range(0f, 1f) > 0.99f)
-						block = (ushort)UnityEngine.Random.Range(1, 5);
+					if (block > 0 && R(0f, 1f) > 0.99f)
+						block = (ushort)RI(1, 5);
 					float bm = biomeMap.GetNoise(x, y);
 					if (bm > 0.1f)
-						block = (ushort)UnityEngine.Random.Range(3, 5);
+						block = (ushort)RI(3, 5);
 					if (block > 0 && bm < -0.8f)
 						block = 15;
 					if (biome == 1 && y < W.height * 0.5f)
 					{
 						float num3 = y / (float)W.height * 2f;
-						if (UnityEngine.Random.Range(0f, 1f) > num3 && block == 2)
+						if (R(0f, 1f) > num3 && block == 2)
 							block = 12;
-						if (y < W.height * 0.33f && UnityEngine.Random.Range(0f, 1f) > num3 * 3f && block == 1)
+						if (y < W.height * 0.33f && R(0f, 1f) > num3 * 3f && block == 1)
 							block = 13;
 					}
-					wb[x, y] = block;
+					wb[x - bx, y - by] = block;
 				}
 			}
 		}
@@ -748,19 +941,19 @@ static void RenderChunk(Vector2Int c)
 						if (noise2 > 0.75f)
 							block = 15;
 						if (biomeMap2.GetNoise(x, y) > 0.1f)
-							block = (ushort)UnityEngine.Random.Range(3, 5);
-						if (biome == 3 && block > 0 && UnityEngine.Random.value < 0.1f)
-							block = (ushort)(15 + UnityEngine.Random.Range(0, 2));
-						wb[x, y] = block;
+							block = (ushort)RI(3, 5);
+						if (biome == 3 && block > 0 && RV() < 0.1f)
+							block = (ushort)(15 + RI(0, 2));
+						wb[x - bx, y - by] = block;
 					}
 					else
 					{
-						wb[x, y] = (ushort)((noise2 > num16) ? (dirtPerlin.GetNoise(x, y) < -0.1f ? 18 : 19) : 0);
+						wb[x - bx, y - by] = (ushort)((noise2 > num16) ? (dirtPerlin.GetNoise(x, y) < -0.1f ? 18 : 19) : 0);
 					}
-					if (biome == 3 && toxicNoise.GetNoise(x, y) < -0.8f && UnityEngine.Random.value > 0.5f)
-						wb[x, y] = 22;
-					if (biome == 3 && wb[x, y] > 0 && UnityEngine.Random.value > (y + W.halfHeight) / (float)W.height)
-						wb[x, y] = 23;
+					if (biome == 3 && toxicNoise.GetNoise(x, y) < -0.8f && RV() > 0.5f)
+						wb[x - bx, y - by] = 22;
+					if (biome == 3 && wb[x - bx, y - by] > 0 && RV() > (y + W.halfHeight) / (float)W.height)
+						wb[x - bx, y - by] = 23;
 				}
 			}
 		}
@@ -777,7 +970,7 @@ static void RenderChunk(Vector2Int c)
 						marbleMap.SetFrequency(freq);
 						lastFreq = freq;
 					}
-					float num31 = marbleMap.GetNoise(x, y) + UnityEngine.Random.Range(-0.1f, 0.1f);
+					float num31 = marbleMap.GetNoise(x, y) + R(-0.1f, 0.1f);
 					ushort block;
 					if (num31 > 0.15f && num31 < 0.25f) block = 23;
 					else if (num31 >= 0.25f && num31 < 0.45f) block = 16;
@@ -786,7 +979,7 @@ static void RenderChunk(Vector2Int c)
 					else block = 0;
 					if (biomeMap2.GetNoise(x, y) < -0.735f)
 						block = 0;
-					wb[x, y] = block;
+					wb[x - bx, y - by] = block;
 				}
 			}
 		}
