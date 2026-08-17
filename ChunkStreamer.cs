@@ -336,6 +336,8 @@ public static class ChunkStreamer
 				pendingFull.Add(c);
 			}
 			RenderChunk(c);
+			GenChunkStructures(c);
+			RefreshAround(c);
 		}
 		catch (Exception e)
 		{
@@ -362,6 +364,300 @@ static void RenderChunk(Vector2Int c)
 			}
 		}
 		tm.SetTiles(positions, tiles);
+	}
+
+	// ===== 结构生成(照搬原版 WorldGenerateStructures/GenerateDropCapsules/
+	// GenerateCollapsedPods/GenerateLifePods,按区块归属) =====
+	// 原版:全图循环次数 = chunkWidth*chunkHeight*amt*rarity = 256*amt*rarity
+	// 每块期望 λ = amt*rarity;用 while(Random.value<λ) 掷次数(几何分布,期望=λ)
+	static int Poisson(float lambda)
+	{
+		int k = 0;
+		while (UnityEngine.Random.value < lambda) k++;
+		return k;
+	}
+
+	// 从世界坐标 pos 向下扫找第一个实心格(替代原版 Physics2D.Raycast,
+	// 因为分块生成时 collider 未更新)。原版 raycast 命中点落在实心格表面,
+	// WorldToBlockPos 取整后即实心格本身(结构"嵌"在石头里,与观感一致)
+	static bool GroundAbove(Vector2 pos, out Vector2Int ground, float maxDist = 400f)
+	{
+		Vector2Int p = W.WorldToBlockPos(pos);
+		for (int y = p.y; y >= 0 && p.y - y < maxDist; y--)
+		{
+			if (WB[p.x, y] > 0)
+			{
+				ground = new Vector2Int(p.x, y);
+				return true;
+			}
+		}
+		ground = p;
+		return false;
+	}
+
+	// 块内随机世界坐标,偏向块中心(原版为全图随机;限制在中心 ±22 格内使
+	// 半径 ≤20 的结构不跨块边界,避免分块生成时结构边缘被邻块地形覆盖)
+	static Vector2 RandPosInChunk(Vector2Int c)
+	{
+		return new Vector2(c.x * CS - W.halfWidth + UnityEngine.Random.Range(10, CS - 10),
+			c.y * CS - W.halfHeight + UnityEngine.Random.Range(10, CS - 10));
+	}
+
+	// 结构写入后刷新本块+已生成邻块(结构只写 worldBlocks,靠刷新显示)
+	static void RefreshAround(Vector2Int c)
+	{
+		for (int dx = -1; dx <= 1; dx++)
+		{
+			for (int dy = -1; dy <= 1; dy++)
+			{
+				int x = c.x + dx, y = c.y + dy;
+				if (x < 0 || y < 0 || x > 15 || y > 15) continue;
+				if (!genData[x, y]) continue;
+				RenderChunk(new Vector2Int(x, y));
+			}
+		}
+	}
+
+	// 照搬原版 WorldGenerateStructures(按 biomeDepth 分层;原版结构密度与块无关)
+	static void GenChunkStructures(Vector2Int c)
+	{
+		if (W.biomeOverride != WorldGeneration.OverrideSceneType.None) return;
+		int d = W.biomeDepth;
+		if (d > 4) return;
+		try
+		{
+			float lrm = W.totalLootRarity;
+			int n;
+			// case1:空投舱+塌陷舱(所有层,密度按层,无 rarity 乘数)
+			n = Poisson(UnityEngine.Random.Range(0.12f, 0.13f));
+			for (int i = 0; i < n; i++) DropCapsuleAt(c);
+			float cap;
+			if (d == 2) cap = UnityEngine.Random.Range(0.066f, 0.077f);
+			else if (d == 3) cap = UnityEngine.Random.Range(0.066f, 0.077f) * 2.5f;
+			else if (d == 4) cap = UnityEngine.Random.Range(0.066f, 0.077f);
+			else cap = UnityEngine.Random.Range(0.055f, 0.066f);
+			n = Poisson(cap);
+			for (int i = 0; i < n; i++) CollapsedPodAt(c);
+			if (d <= 1)
+			{
+				// case2:depth>0 才有 BioContainer/SteelBridge(SteelBridge 无 raycast,位置=随机点)
+				if (d > 0)
+				{
+					BioContainerAt(c, 0.05f, 0.07f, 1f);
+					BridgeAt(c, 0.09f, 0.12f, "Structures/SteelBridge", 0.85f, raycast: false);
+				}
+				PodAt(c, 0.06f, 0.08f, "Structures/CratePod", 0.82f);
+				PodAt(c, 0.06f, 0.08f, "Structures/MiniPod", 0.88f);
+				PodAt(c, 0.045f, 0.05f, "Structures/SteelThing", 0.9f, entity: false);
+				PodAt(c, 0.03f, 0.05f, "Structures/WoodCross", 0.94f, entity: false);
+				PodAt(c, 0.03f, 0.05f, "Structures/WoodHorizontal", 0.94f, entity: false);
+			}
+			else if (d == 2 || d == 3)
+			{
+				// case3
+				BioContainerAt(c, 0.05f, 0.07f, 1f);
+				PodAt(c, 0.04f, 0.05f, "Structures/MedicalBuilding", 0.98f);
+				BridgeAt(c, 0.09f, 0.12f, "Structures/SteelBridge", 0.95f, raycast: false);
+				PodAt(c, 0.06f, 0.08f, "Structures/MiniPod", 0.88f);
+				PodAt(c, 0.03f, 0.05f, "Structures/WoodCross", 0.94f, entity: false);
+				PodAt(c, 0.03f, 0.05f, "Structures/WoodHorizontal", 0.94f, entity: false);
+			}
+			else
+			{
+				// case4:大树(raycast 距离=CHUNKSIZE=64,无 rarity)
+				n = Poisson(UnityEngine.Random.Range(0.9f, 1.1f));
+				for (int i = 0; i < n; i++)
+				{
+					Vector2Int p;
+					if (GroundAbove(RandPosInChunk(c), out p, 64f))
+						W.GenerateTree(p);
+				}
+				PodAt(c, 0.06f, 0.08f, "Structures/CratePod", 0.82f);
+				PodAt(c, 0.06f, 0.08f, "Structures/MiniPod", 0.88f);
+				PodAt(c, 0.03f, 0.05f, "Structures/WoodCross", 0.95f, entity: false);
+				PodAt(c, 0.03f, 0.05f, "Structures/WoodHorizontal", 0.95f, entity: false);
+				PodAt(c, 0.04f, 0.05f, "Structures/BrickLoot", 0.925f);
+				BioContainerAt(c, 0.03f, 0.04f, 0.975f);
+				IronVein(c, 1);
+				IronVein(c, 2);
+			}
+			// 生命舱(所有层,无 rarity)
+			n = Poisson(UnityEngine.Random.Range(0.088f, 0.1f));
+			for (int i = 0; i < n; i++) LifePodAt(c);
+		}
+		catch (Exception e)
+		{
+			Plugin.Log.LogWarning("chunk structures failed " + c + ": " + e);
+		}
+	}
+
+	static void DropCapsuleAt(Vector2Int c)
+	{
+		Vector2 pos = RandPosInChunk(c);
+		Vector2Int p;
+		if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
+		((GameObject)UnityEngine.Object.Instantiate(Resources.Load("dropcapsule"), pos,
+			Quaternion.Euler(0f, 0f, UnityEngine.Random.Range(0f, 360f)))).GetComponent<AudioSource>().pitch = UnityEngine.Random.Range(0.9f, 1.1f);
+		W.GenerateBlockCircle(pos, 32, 3, 0.7f, 0f);
+		W.GenerateBlockCircle(pos, 30, 6, 0.04f, 0.04f);
+		W.GenerateBlockCircle(pos, 4, 0, 1f, 0.9f);
+	}
+
+	static void CollapsedPodAt(Vector2Int c)
+	{
+		Vector2 pos = RandPosInChunk(c);
+		Vector2Int p;
+		if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
+		Vector2Int vp = W.WorldToBlockPos(pos);
+		CraterAt(pos, vp);
+		W.GenerateObjectAtPos(vp, Resources.Load<GameObject>("LifepodCollapsed").transform.GetChild(0).GetComponent<Tilemap>(), 0.88f, true);
+		if (UnityEngine.Random.value < 0.9f)
+		{
+			AmmoScript component = ((GameObject)UnityEngine.Object.Instantiate(Resources.Load(Utils.PickRandom(W.spawnableMagazines)), pos,
+				Quaternion.Euler(0f, 0f, UnityEngine.Random.value * 360f))).GetComponent<AmmoScript>();
+			component.rounds = Mathf.RoundToInt(component.maxRounds * UnityEngine.Random.value);
+		}
+		for (int l = 0; l < 3; l++)
+		{
+			if (UnityEngine.Random.Range(0f, 1f) < 0.3f)
+				UnityEngine.Object.Instantiate(Resources.Load("experimentflesh"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
+		}
+		if (UnityEngine.Random.Range(0f, 1f) < 0.8f)
+			UnityEngine.Object.Instantiate(Resources.Load("internalorgans"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
+	}
+
+	static void LifePodAt(Vector2Int c)
+	{
+		Vector2 pos = RandPosInChunk(c);
+		Vector2Int p;
+		if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
+		Vector2Int vp = W.WorldToBlockPos(pos);
+		CraterAt(pos, vp);
+		W.GenerateObjectAtPos(vp, Resources.Load<GameObject>("Lifepod").transform.GetChild(0).GetComponent<Tilemap>(), 0.95f, true);
+		W.GenerateEntityAtPos(W.BlockToWorldPos(vp), Resources.Load<GameObject>("Lifepod"));
+		if (UnityEngine.Random.value < WorldGeneration.GetRunSettingFloat("traderchance") * 0.01f)
+		{
+			int num3 = UnityEngine.Random.Range(-4, 4);
+			TraderScript component = ((GameObject)UnityEngine.Object.Instantiate(Resources.Load("trader" + UnityEngine.Random.Range(1, 4)),
+				W.BlockToWorldPos(vp + Vector2Int.down * 7 + Vector2Int.right * num3) - Vector2.one * 0.5f, Quaternion.identity)).GetComponent<TraderScript>();
+			if (Mathf.Abs(num3) > 1.5f) component.farEnoughToMove = true;
+			component.MoveRange = new RangeF(W.BlockToWorldPos(vp - Vector2Int.right * 5).x, W.BlockToWorldPos(vp + Vector2Int.right * 5).x);
+		}
+		else
+		{
+			UnityEngine.Object.Instantiate(Resources.Load("lifepodchest"), W.BlockToWorldPos(vp + Vector2Int.down * 6) - Vector2.one * 0.5f, Quaternion.identity);
+		}
+		for (int l = 0; l < 3; l++)
+		{
+			if (UnityEngine.Random.Range(0f, 1f) < 0.05f)
+				UnityEngine.Object.Instantiate(Resources.Load("experimentflesh"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
+		}
+		if (UnityEngine.Random.Range(0f, 1f) < 0.05f)
+			UnityEngine.Object.Instantiate(Resources.Load("internalorgans"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
+		if (UnityEngine.Random.Range(0f, 1f) < 0.5f)
+			UnityEngine.Object.Instantiate(Resources.Load("LoreNote"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f) + Vector2.up * UnityEngine.Random.Range(-1f, -6f), Quaternion.identity);
+		if (UnityEngine.Random.Range(0f, 1f) < 0.285f)
+			Utils.Create("epda", pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), UnityEngine.Random.value * 360f);
+		if (UnityEngine.Random.value < 0.2f)
+		{
+			Vector2 pos2 = pos + Vector2.right * UnityEngine.Random.Range(-1.5f, 1.5f);
+			Utils.Create("Special/defibrack", pos2, 0f);
+			bool num4 = UnityEngine.Random.value < 0.5f;
+			float value = UnityEngine.Random.value;
+			GameObject go = null;
+			if (UnityEngine.Random.value < 0.75f)
+			{
+				go = Utils.Create("manualdefibrillator", pos2, 0f);
+				go.AddComponent<ItemLock>();
+			}
+			else
+			{
+				go = Utils.Create("aed", pos2, 0f);
+				go.AddComponent<ItemLock>();
+			}
+			if (!num4) go.GetComponent<Item>().battery.UnloadBattery(true);
+			else go.GetComponent<Item>().condition = value;
+		}
+	}
+
+	// 塌陷坑:中心 90x90 范围内把实心块随机打碎(照搬原版)
+	static void CraterAt(Vector2 pos, Vector2Int vp)
+	{
+		for (int j = 0; j < 90; j++)
+		{
+			for (int k = 0; k < 90; k++)
+			{
+				float num2 = Vector2.Distance(pos + Vector2.up * k + Vector2.right * j - Vector2.one * 45f, pos);
+				if (num2 < 45f * UnityEngine.Random.Range(0f, 12f / (num2 * 0.8f)) && UnityEngine.Random.Range(0f, 1f) < 0.7f)
+				{
+					Vector2Int v2 = new Vector2Int(Mathf.Clamp(vp.x - 45 + j, 0, (int)(W.width - 1)), Mathf.Clamp(vp.y - 45 + k + 2, 0, (int)(W.height - 1)));
+					if (WB[v2.x, v2.y] > 0)
+						WB[v2.x, v2.y] = (ushort)UnityEngine.Random.Range(0, 5);
+				}
+			}
+		}
+	}
+
+	static void BioContainerAt(Vector2Int c, float lo, float hi, float chance)
+	{
+		int n = Poisson(UnityEngine.Random.Range(lo, hi) * W.totalLootRarity);
+		for (int i = 0; i < n; i++)
+		{
+			Vector2 pos = RandPosInChunk(c);
+			Vector2Int p;
+			if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
+			W.GenerateBlockCircle(pos, 16, 3, 0.8f, 0f);
+			W.GenerateBlockCircle(pos, 20, 4, 0.3f, 0f);
+			W.GenerateBlockCircle(pos, 16, 0, 0.15f, 0f);
+			W.GenerateObjectAtPos(p, Resources.Load<GameObject>("BioContainer").transform.GetChild(0).GetComponent<Tilemap>(), chance, true);
+			W.GenerateEntityAtPos(W.BlockToWorldPos(p), Resources.Load<GameObject>("BioContainer"));
+		}
+	}
+
+	// raycast=false 时位置=随机点本身(原版 SteelBridge 无 raycast)
+	static void BridgeAt(Vector2Int c, float lo, float hi, string res, float chance, bool raycast = true)
+	{
+		int n = Poisson(UnityEngine.Random.Range(lo, hi) * W.totalLootRarity);
+		for (int i = 0; i < n; i++)
+		{
+			Vector2 pos = RandPosInChunk(c);
+			if (raycast)
+			{
+				Vector2Int p;
+				if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
+			}
+			W.GenerateObjectAtPos(W.WorldToBlockPos(pos), Resources.Load<GameObject>(res).GetComponent<Tilemap>(), chance, true);
+			W.GenerateEntityAtPos(pos, Resources.Load<GameObject>(res));
+		}
+	}
+
+	static void PodAt(Vector2Int c, float lo, float hi, string res, float chance, bool entity = true)
+	{
+		int n = Poisson(UnityEngine.Random.Range(lo, hi) * W.totalLootRarity);
+		for (int i = 0; i < n; i++)
+		{
+			Vector2 pos = RandPosInChunk(c);
+			Vector2Int p;
+			if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
+			W.GenerateBlockCircle(pos, 16, 3, 0.5f, 0f);
+			W.GenerateBlockCircle(pos, 20, 4, 0.2f, 0f);
+			W.GenerateObjectAtPos(p, Resources.Load<GameObject>(res).GetComponent<Tilemap>(), chance, true);
+			if (entity) W.GenerateEntityAtPos(W.BlockToWorldPos(p), Resources.Load<GameObject>(res));
+		}
+	}
+
+	static void IronVein(Vector2Int c, int width)
+	{
+		Vector2Int v = new Vector2Int(UnityEngine.Random.Range(c.x * CS, c.x * CS + CS), UnityEngine.Random.Range(c.y * CS, c.y * CS + CS));
+		int len = UnityEngine.Random.Range(1, 5);
+		for (int a = 0; a < len; a++)
+		{
+			for (int b = 0; b < width; b++)
+			{
+				if (v.x + a < W.width && v.y + b < W.height)
+					WB[v.x + a, v.y + b] = 5;
+			}
+		}
 	}
 
 	// ===== 地形(照搬原版 WorldGenerateTerrain 循环,范围=区块) =====
@@ -480,6 +776,38 @@ static void RenderChunk(Vector2Int c)
 			ox += UnityEngine.Random.value > 0.5f ? (UnityEngine.Random.value > 0.5f ? 1 : -1) : 0;
 			oy += UnityEngine.Random.value > 0.5f ? (UnityEngine.Random.value > 0.5f ? 1 : -1) : 0;
 			if (ox < 0 || oy < 0 || ox >= W.width || oy >= W.height) break;
+		}
+		// 块状矿脉(照搬原版地形循环 1811-1881,按 biomeDepth 分支:
+		// biomeDepth>0 银矿(5),biomeDepth==0 铜矿(11))
+		if (W.biomeDepth > 0)
+		{
+			VeinChunk(c, UnityEngine.Random.Range(0.35f, 0.5f), 5, 3, 6, 64, true);
+			VeinChunk(c, UnityEngine.Random.Range(0.35f, 0.5f), 5, 3, 6, 60, false);
+		}
+		else
+		{
+			VeinChunk(c, UnityEngine.Random.Range(0.35f, 0.4f), 11, 2, 6, 48, true);
+			VeinChunk(c, UnityEngine.Random.Range(0.35f, 0.4f), 11, 2, 6, 48, false);
+		}
+	}
+
+	// 每条矿脉:起点块内随机,长 len(横/竖),宽 w,直接写 WB
+	static void VeinChunk(Vector2Int c, float amt, ushort block, int w, int lenMin, int lenMax, bool horizontal)
+	{
+		int n = Poisson(amt);
+		for (int i = 0; i < n; i++)
+		{
+			Vector2Int v = new Vector2Int(c.x * CS + UnityEngine.Random.Range(0, CS), c.y * CS + UnityEngine.Random.Range(0, CS));
+			int len = UnityEngine.Random.Range(lenMin, lenMax);
+			for (int a = 0; a < len; a++)
+			{
+				for (int b = 0; b < w; b++)
+				{
+					int X = horizontal ? v.x + a : v.x + b;
+					int Y = horizontal ? v.y + b : v.y + a;
+					if (X < W.width && Y < W.height) WB[X, Y] = block;
+				}
+			}
 		}
 	}
 
