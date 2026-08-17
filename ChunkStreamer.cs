@@ -38,8 +38,34 @@ public static class ChunkStreamer
 	// 区块状态
 	public static readonly bool[,] genData = new bool[16, 16]; // worldBlocks 数据已生成
 	static readonly bool[,] colliderOn = new bool[16, 16];     // collider 当前状态
+	static readonly bool[,] inQueue = new bool[16, 16];        // 该块是否已在生成队列(避免 List.Contains O(n))
 	static readonly List<Vector2Int> queue = new List<Vector2Int>();
 	static readonly List<Vector2Int> pendingFull = new List<Vector2Int>(); // 初始只生成地形的块,待补实体/矿物/液体
+
+	// 渲染复用数组(RenderChunk 每帧多次调用,避免反复分配)
+	static readonly Vector3Int[] renderPos = new Vector3Int[CS * CS];
+	static readonly TileBase[] renderTiles = new TileBase[CS * CS];
+
+	// 结构资源缓存(Resources.Load 结果,避免每块重复加载)
+	static readonly Dictionary<string, GameObject> structRes = new Dictionary<string, GameObject>();
+	static GameObject GetStruct(string name)
+	{
+		if (!structRes.TryGetValue(name, out var go))
+		{
+			go = Resources.Load<GameObject>(name);
+			structRes[name] = go;
+		}
+		return go;
+	}
+	static GameObject GetStructObj(string name)
+	{
+		if (!structRes.TryGetValue(name, out var go))
+		{
+			go = (GameObject)Resources.Load(name);
+			structRes[name] = go;
+		}
+		return go;
+	}
 
 	// 调度参数
 	public const int GEN_RADIUS = 5;     // 生成半径(区块),11x11
@@ -48,6 +74,7 @@ public static class ChunkStreamer
 	public const int MAX_PER_FRAME = 4;  // 每帧后台生成区块数上限
 
 	public static Vector2Int PlayerChunk = new Vector2Int(8, 8);
+	static Vector2Int lastScanChunk = new Vector2Int(int.MinValue, int.MinValue); // 上次卸载扫描的玩家块
 	public static int QueueCount => queue.Count;
 	static float nextLogTime;
 
@@ -58,6 +85,7 @@ public static class ChunkStreamer
 		Active = true;
 		Array.Clear(genData, 0, genData.Length);
 		Array.Clear(colliderOn, 0, colliderOn.Length);
+		Array.Clear(inQueue, 0, inQueue.Length);
 		queue.Clear();
 	}
 
@@ -65,6 +93,7 @@ public static class ChunkStreamer
 	{
 		Array.Clear(genData, 0, genData.Length);
 		Array.Clear(colliderOn, 0, colliderOn.Length);
+		Array.Clear(inQueue, 0, inQueue.Length);
 		queue.Clear();
 		pendingFull.Clear();
 	}
@@ -221,7 +250,7 @@ public static class ChunkStreamer
 				Vector2Int cc = new Vector2Int(x, y);
 				if (!InWorld(cc) || genData[cc.x, cc.y]) continue;
 				if (genNow) GenChunk(cc, false);
-				else queue.Add(cc);
+				else { queue.Add(cc); inQueue[cc.x, cc.y] = true; }
 			}
 		}
 	}
@@ -240,20 +269,25 @@ public static class ChunkStreamer
 		}
 		catch { }
 		// 新进入范围的区块入队
+		bool added = false;
 		if (StreamOn)
 		for (int x = pc.x - GEN_RADIUS; x <= pc.x + GEN_RADIUS; x++)
 		{
 			for (int y = pc.y - GEN_RADIUS; y <= pc.y + GEN_RADIUS; y++)
 			{
 				if (x < 0 || y < 0 || x > 15 || y > 15) continue;
-				if (!genData[x, y] && !queue.Contains(new Vector2Int(x, y)))
+				if (!genData[x, y] && !inQueue[x, y])
+				{
 					queue.Add(new Vector2Int(x, y));
+					inQueue[x, y] = true;
+					added = true;
+				}
 			}
 		}
-		// 优先生成最近的
+		// 优先生成最近的(仅当有新块入队时才排序)
 		if (queue.Count > 0)
 		{
-			queue.Sort((a, b) => Dist2(a, pc).CompareTo(Dist2(b, pc)));
+			if (added) queue.Sort((a, b) => Dist2(a, pc).CompareTo(Dist2(b, pc)));
 			int n = Mathf.Min(MAX_PER_FRAME, queue.Count);
 			for (int i = 0; i < n; i++)
 			{
@@ -281,30 +315,36 @@ public static class ChunkStreamer
 				}
 			}
 		}
-		// 卸载:超出卸载半径的区块关闭 collider;回到半径内恢复
-		int genCount = 0, unloadCount = 0;
-		for (int x = 0; x < 16; x++)
+		// 卸载:超出卸载半径的区块关闭 collider;回到半径内恢复。
+		// 仅玩家块变化时才扫描(静止时距离关系不变,结果必相同)
+		int unloadCount = 0;
+		if (pc != lastScanChunk)
 		{
-			for (int y = 0; y < 16; y++)
+			lastScanChunk = pc;
+			for (int x = 0; x < 16; x++)
 			{
-				if (!genData[x, y]) continue;
-				genCount++;
-				bool far = Dist2(new Vector2Int(x, y), pc) > UNLOAD_RADIUS * UNLOAD_RADIUS;
-				if (far == colliderOn[x, y])
+				for (int y = 0; y < 16; y++)
 				{
-					Tilemap tm = CH[x, y];
-					if (tm == null) continue;
-					var col = tm.GetComponent<TilemapCollider2D>();
-					if (col == null) continue;
-					col.enabled = !far;
-					colliderOn[x, y] = !far;
-					unloadCount++;
+					if (!genData[x, y]) continue;
+					bool far = Dist2(new Vector2Int(x, y), pc) > UNLOAD_RADIUS * UNLOAD_RADIUS;
+					if (far == colliderOn[x, y])
+					{
+						Tilemap tm = CH[x, y];
+						if (tm == null) continue;
+						var col = tm.GetComponent<TilemapCollider2D>();
+						if (col == null) continue;
+						col.enabled = !far;
+						colliderOn[x, y] = !far;
+						unloadCount++;
+					}
 				}
 			}
 		}
 		if (Time.unscaledTime > nextLogTime)
 		{
 			nextLogTime = Time.unscaledTime + 5f;
+			int genCount = 0;
+			for (int x = 0; x < 16; x++) for (int y = 0; y < 16; y++) if (genData[x, y]) genCount++;
 			Plugin.Log.LogInfo("CS: generated " + genCount + "/256, queue " + queue.Count + ", collider toggles " + unloadCount);
 		}
 	}
@@ -322,6 +362,7 @@ public static class ChunkStreamer
 	{
 		if (genData[c.x, c.y]) return;
 		genData[c.x, c.y] = true;
+		inQueue[c.x, c.y] = false;
 		try
 		{
 			GenChunkTerrain(c);
@@ -351,19 +392,17 @@ static void RenderChunk(Vector2Int c)
 		if (tm == null) return;
 		int bx = c.x * CS, by = c.y * CS;
 		int n = CS * CS;
-		var positions = new Vector3Int[n];
-		var tiles = new TileBase[n];
 		int half = W.HALFCHUNKSIZE;
 		for (int i = 0; i < CS; i++)
 		{
 			for (int j = 0; j < CS; j++)
 			{
 				int idx = j * CS + i;
-				positions[idx] = new Vector3Int(i - half, j - half, 0);
-				tiles[idx] = W.tiles[WB[bx + i, by + j]];
+				renderPos[idx] = new Vector3Int(i - half, j - half, 0);
+				renderTiles[idx] = W.tiles[WB[bx + i, by + j]];
 			}
 		}
-		tm.SetTiles(positions, tiles);
+		tm.SetTiles(renderPos, renderTiles);
 	}
 
 	// ===== 结构生成(照搬原版 WorldGenerateStructures/GenerateDropCapsules/
@@ -496,7 +535,7 @@ static void RenderChunk(Vector2Int c)
 		Vector2 pos = RandPosInChunk(c);
 		Vector2Int p;
 		if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
-		((GameObject)UnityEngine.Object.Instantiate(Resources.Load("dropcapsule"), pos,
+		((GameObject)UnityEngine.Object.Instantiate(GetStructObj("dropcapsule"), pos,
 			Quaternion.Euler(0f, 0f, UnityEngine.Random.Range(0f, 360f)))).GetComponent<AudioSource>().pitch = UnityEngine.Random.Range(0.9f, 1.1f);
 		W.GenerateBlockCircle(pos, 32, 3, 0.7f, 0f);
 		W.GenerateBlockCircle(pos, 30, 6, 0.04f, 0.04f);
@@ -510,20 +549,20 @@ static void RenderChunk(Vector2Int c)
 		if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
 		Vector2Int vp = W.WorldToBlockPos(pos);
 		CraterAt(pos, vp);
-		W.GenerateObjectAtPos(vp, Resources.Load<GameObject>("LifepodCollapsed").transform.GetChild(0).GetComponent<Tilemap>(), 0.88f, true);
+		W.GenerateObjectAtPos(vp, GetStruct("LifepodCollapsed").transform.GetChild(0).GetComponent<Tilemap>(), 0.88f, true);
 		if (UnityEngine.Random.value < 0.9f)
 		{
-			AmmoScript component = ((GameObject)UnityEngine.Object.Instantiate(Resources.Load(Utils.PickRandom(W.spawnableMagazines)), pos,
+			AmmoScript component = ((GameObject)UnityEngine.Object.Instantiate(GetStructObj(Utils.PickRandom(W.spawnableMagazines)), pos,
 				Quaternion.Euler(0f, 0f, UnityEngine.Random.value * 360f))).GetComponent<AmmoScript>();
 			component.rounds = Mathf.RoundToInt(component.maxRounds * UnityEngine.Random.value);
 		}
 		for (int l = 0; l < 3; l++)
 		{
 			if (UnityEngine.Random.Range(0f, 1f) < 0.3f)
-				UnityEngine.Object.Instantiate(Resources.Load("experimentflesh"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
+				UnityEngine.Object.Instantiate(GetStructObj("experimentflesh"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
 		}
 		if (UnityEngine.Random.Range(0f, 1f) < 0.8f)
-			UnityEngine.Object.Instantiate(Resources.Load("internalorgans"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
+			UnityEngine.Object.Instantiate(GetStructObj("internalorgans"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
 	}
 
 	static void LifePodAt(Vector2Int c)
@@ -533,29 +572,29 @@ static void RenderChunk(Vector2Int c)
 		if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
 		Vector2Int vp = W.WorldToBlockPos(pos);
 		CraterAt(pos, vp);
-		W.GenerateObjectAtPos(vp, Resources.Load<GameObject>("Lifepod").transform.GetChild(0).GetComponent<Tilemap>(), 0.95f, true);
-		W.GenerateEntityAtPos(W.BlockToWorldPos(vp), Resources.Load<GameObject>("Lifepod"));
+		W.GenerateObjectAtPos(vp, GetStruct("Lifepod").transform.GetChild(0).GetComponent<Tilemap>(), 0.95f, true);
+		W.GenerateEntityAtPos(W.BlockToWorldPos(vp), GetStruct("Lifepod"));
 		if (UnityEngine.Random.value < WorldGeneration.GetRunSettingFloat("traderchance") * 0.01f)
 		{
 			int num3 = UnityEngine.Random.Range(-4, 4);
-			TraderScript component = ((GameObject)UnityEngine.Object.Instantiate(Resources.Load("trader" + UnityEngine.Random.Range(1, 4)),
+			TraderScript component = ((GameObject)UnityEngine.Object.Instantiate(GetStructObj("trader" + UnityEngine.Random.Range(1, 4)),
 				W.BlockToWorldPos(vp + Vector2Int.down * 7 + Vector2Int.right * num3) - Vector2.one * 0.5f, Quaternion.identity)).GetComponent<TraderScript>();
 			if (Mathf.Abs(num3) > 1.5f) component.farEnoughToMove = true;
 			component.MoveRange = new RangeF(W.BlockToWorldPos(vp - Vector2Int.right * 5).x, W.BlockToWorldPos(vp + Vector2Int.right * 5).x);
 		}
 		else
 		{
-			UnityEngine.Object.Instantiate(Resources.Load("lifepodchest"), W.BlockToWorldPos(vp + Vector2Int.down * 6) - Vector2.one * 0.5f, Quaternion.identity);
+			UnityEngine.Object.Instantiate(GetStructObj("lifepodchest"), W.BlockToWorldPos(vp + Vector2Int.down * 6) - Vector2.one * 0.5f, Quaternion.identity);
 		}
 		for (int l = 0; l < 3; l++)
 		{
 			if (UnityEngine.Random.Range(0f, 1f) < 0.05f)
-				UnityEngine.Object.Instantiate(Resources.Load("experimentflesh"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
+				UnityEngine.Object.Instantiate(GetStructObj("experimentflesh"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
 		}
 		if (UnityEngine.Random.Range(0f, 1f) < 0.05f)
-			UnityEngine.Object.Instantiate(Resources.Load("internalorgans"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
+			UnityEngine.Object.Instantiate(GetStructObj("internalorgans"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
 		if (UnityEngine.Random.Range(0f, 1f) < 0.5f)
-			UnityEngine.Object.Instantiate(Resources.Load("LoreNote"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f) + Vector2.up * UnityEngine.Random.Range(-1f, -6f), Quaternion.identity);
+			UnityEngine.Object.Instantiate(GetStructObj("LoreNote"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f) + Vector2.up * UnityEngine.Random.Range(-1f, -6f), Quaternion.identity);
 		if (UnityEngine.Random.Range(0f, 1f) < 0.285f)
 			Utils.Create("epda", pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), UnityEngine.Random.value * 360f);
 		if (UnityEngine.Random.value < 0.2f)
@@ -609,8 +648,8 @@ static void RenderChunk(Vector2Int c)
 			W.GenerateBlockCircle(pos, 16, 3, 0.8f, 0f);
 			W.GenerateBlockCircle(pos, 20, 4, 0.3f, 0f);
 			W.GenerateBlockCircle(pos, 16, 0, 0.15f, 0f);
-			W.GenerateObjectAtPos(p, Resources.Load<GameObject>("BioContainer").transform.GetChild(0).GetComponent<Tilemap>(), chance, true);
-			W.GenerateEntityAtPos(W.BlockToWorldPos(p), Resources.Load<GameObject>("BioContainer"));
+			W.GenerateObjectAtPos(p, GetStruct("BioContainer").transform.GetChild(0).GetComponent<Tilemap>(), chance, true);
+			W.GenerateEntityAtPos(W.BlockToWorldPos(p), GetStruct("BioContainer"));
 		}
 	}
 
@@ -626,8 +665,8 @@ static void RenderChunk(Vector2Int c)
 				Vector2Int p;
 				if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
 			}
-			W.GenerateObjectAtPos(W.WorldToBlockPos(pos), Resources.Load<GameObject>(res).GetComponent<Tilemap>(), chance, true);
-			W.GenerateEntityAtPos(pos, Resources.Load<GameObject>(res));
+			W.GenerateObjectAtPos(W.WorldToBlockPos(pos), GetStruct(res).GetComponent<Tilemap>(), chance, true);
+			W.GenerateEntityAtPos(pos, GetStruct(res));
 		}
 	}
 
@@ -641,8 +680,8 @@ static void RenderChunk(Vector2Int c)
 			if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
 			W.GenerateBlockCircle(pos, 16, 3, 0.5f, 0f);
 			W.GenerateBlockCircle(pos, 20, 4, 0.2f, 0f);
-			W.GenerateObjectAtPos(p, Resources.Load<GameObject>(res).GetComponent<Tilemap>(), chance, true);
-			if (entity) W.GenerateEntityAtPos(W.BlockToWorldPos(p), Resources.Load<GameObject>(res));
+			W.GenerateObjectAtPos(p, GetStruct(res).GetComponent<Tilemap>(), chance, true);
+			if (entity) W.GenerateEntityAtPos(W.BlockToWorldPos(p), GetStruct(res));
 		}
 	}
 
@@ -995,7 +1034,7 @@ static void RenderChunk(Vector2Int c)
 			int hx, hy;
 			if (!FindSurface(wx, wy, dir == default(Vector2) ? Vector2.down : dir, out hx, out hy)) continue;
 			if (check != null && !check(hx, hy)) continue;
-			GameObject prefab = (GameObject)Resources.Load(name);
+			GameObject prefab = GetStructObj(name);
 			if (prefab == null) continue;
 			Vector2 point = new Vector2(hx + 0.5f, hy + 1f);
 			float off = UnityEngine.Random.Range(yOff - yDev, yOff + yDev);
