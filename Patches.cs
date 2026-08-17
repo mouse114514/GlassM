@@ -70,6 +70,23 @@ public static class Patches
 				+ " biome=" + (WorldGeneration.world != null ? WorldGeneration.world.biomeOverride.ToString() : "?")
 				+ " cam=" + (PlayerCamera.main != null) + " body=" + (PlayerCamera.main != null && PlayerCamera.main.body != null)
 				+ " spawn=" + (GameObject.Find("TUTORIALSPAWN") != null));
+			if (ChunkStreamer.WB != null)
+			{
+				var sb = new System.Text.StringBuilder("CS: col512 top:");
+				for (int y = 512; y > 460; y--)
+				{
+					sb.Append(ChunkStreamer.WB[512, y]).Append(',');
+				}
+				Plugin.Log.LogInfo(sb.ToString());
+				int first = -1, firstAfterAir = -1;
+				bool air = false;
+				for (int y = 512; y >= 380; y--)
+				{
+					if (ChunkStreamer.WB[512, y] == 0) air = true;
+					else { if (first < 0) first = y; if (air) { firstAfterAir = y; break; } }
+				}
+				Plugin.Log.LogInfo("CS: col512 firstSolid=" + first + " firstSolidAfterAir=" + firstAfterAir + " (halfHeight=512, depth=" + (512 - firstAfterAir) + "m)");
+			}
 		}
 		catch (Exception e)
 		{

@@ -168,14 +168,48 @@ public static class ChunkStreamer
 
 	public static readonly bool StreamOn = true; // 调试:false 时只生成初始区块,不流式扩展
 
-	// ===== 初始生成:同步生成玩家周围区块 + 其余入队 =====
+		// ===== 初始生成:同步生成玩家周围区块 + 其余入队 =====
 	public static void GenerateInitial()
 	{
 		Vector2Int center = new Vector2Int((int)(W.width / 2 / CS), (int)(W.height / 2 / CS));
 		PlayerChunk = center;
 		EnqueueAround(center, INIT_RADIUS, true);
+		GenSpawnCavity();
 		if (StreamOn)
 			EnqueueAround(center, GEN_RADIUS, false);
+	}
+
+	// 出生腔:原版出生点 0~15 米(世界顶部 y≈505 附近),PlaceBody 从顶部
+	// 往下扫"上空下实"。分区块生成时顶部尚未生成会被当成空气,出生点
+	// 会掉到已生成区域的顶部。这里在顶部中心挖出腔体(仿原版出生区):
+	// 腔体 x∈[508,516] y∈[1012,1022] 空气,腔底 y=1011 实心,顶部开口。
+	static void GenSpawnCavity()
+	{
+		if (W == null || WB == null) return;
+		int cx0 = 508 / CS, cx1 = 516 / CS; // 块 7,8
+		int cy = 1011 / CS;                 // 块 15
+		for (int cx = cx0; cx <= cx1; cx++)
+		{
+			if (!genData[cx, cy])
+			{
+				GenChunk(new Vector2Int(cx, cy), false);
+				pendingFull.Add(new Vector2Int(cx, cy));
+			}
+		}
+		for (int x = 508; x <= 516; x++)
+		{
+			for (int y = 1012; y <= 1022; y++)
+				WB[x, y] = 0;
+			WB[x, 1011] = 1;
+			WB[x, 1023] = 0;
+		}
+		for (int x = 506; x <= 518; x++)
+		{
+			WB[x, 1023] = 0;
+		}
+		for (int cx = cx0; cx <= cx1; cx++)
+			RenderChunk(new Vector2Int(cx, cy));
+		Plugin.Log.LogInfo("CS: spawn cavity done, cols=" + cx0 + "-" + cx1 + " row=" + cy);
 	}
 
 	static void EnqueueAround(Vector2Int c, int radius, bool genNow)
