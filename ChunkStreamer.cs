@@ -44,7 +44,7 @@ public static class ChunkStreamer
 	// 调度参数
 	public const int GEN_RADIUS = 5;     // 生成半径(区块),11x11
 	public const int UNLOAD_RADIUS = 7;  // 卸载半径(区块),超出关闭 collider
-	public const int INIT_RADIUS = 2;    // 初始同步生成半径,5x5
+	public const int INIT_RADIUS = 1;    // 初始同步生成半径,3x3
 	public const int MAX_PER_FRAME = 4;  // 每帧后台生成区块数上限
 
 	public static Vector2Int PlayerChunk = new Vector2Int(8, 8);
@@ -166,13 +166,16 @@ public static class ChunkStreamer
 
 	static FastNoiseLite NewNoise() => new FastNoiseLite(UnityEngine.Random.Range(0, int.MaxValue));
 
+	public static readonly bool StreamOn = true; // 调试:false 时只生成初始区块,不流式扩展
+
 	// ===== 初始生成:同步生成玩家周围区块 + 其余入队 =====
 	public static void GenerateInitial()
 	{
 		Vector2Int center = new Vector2Int((int)(W.width / 2 / CS), (int)(W.height / 2 / CS));
 		PlayerChunk = center;
 		EnqueueAround(center, INIT_RADIUS, true);
-		EnqueueAround(center, GEN_RADIUS, false);
+		if (StreamOn)
+			EnqueueAround(center, GEN_RADIUS, false);
 	}
 
 	static void EnqueueAround(Vector2Int c, int radius, bool genNow)
@@ -203,6 +206,7 @@ public static class ChunkStreamer
 		}
 		catch { }
 		// 新进入范围的区块入队
+		if (StreamOn)
 		for (int x = pc.x - GEN_RADIUS; x <= pc.x + GEN_RADIUS; x++)
 		{
 			for (int y = pc.y - GEN_RADIUS; y <= pc.y + GEN_RADIUS; y++)

@@ -18,12 +18,13 @@ public sealed class Plugin : BaseUnityPlugin
 		try
 		{
 			var harmony = new Harmony(Info.Metadata.GUID);
-			Patch(harmony, "WorldGenerateTerrain", "WorldGenerateTerrain_Prefix", true);
-			Patch(harmony, "UpdateWorld", "UpdateWorld_Prefix", true);
-			Patch(harmony, "WorldPlaceEntities", "WorldPlaceEntities_Prefix", true);
-			Patch(harmony, "WorldGenerateStructures", "WorldGenerateStructures_Prefix", true);
-			Patch(harmony, "Update", "Update_Postfix", false);
-			Patch(harmony, "Clear", "Clear_Postfix", false);
+			Patch(harmony, typeof(WorldGeneration), "WorldGenerateTerrain", "WorldGenerateTerrain_Prefix", true);
+			Patch(harmony, typeof(WorldGeneration), "UpdateWorld", "UpdateWorld_Prefix", true);
+			Patch(harmony, typeof(WorldGeneration), "WorldPlaceEntities", "WorldPlaceEntities_Prefix", true);
+			Patch(harmony, typeof(WorldGeneration), "WorldGenerateStructures", "WorldGenerateStructures_Prefix", true);
+			Patch(harmony, typeof(WorldGeneration), "Update", "Update_Postfix", false);
+			Patch(harmony, typeof(WorldGeneration), "Clear", "Clear_Postfix", false);
+			Patch(harmony, typeof(Body), "PlaceBody", "PlaceBody_Prefix", true);
 			Logger.LogInfo("GlassM: patches applied");
 		}
 		catch (Exception ex)
@@ -32,9 +33,9 @@ public sealed class Plugin : BaseUnityPlugin
 		}
 	}
 
-	static void Patch(Harmony harmony, string target, string patchMethod, bool prefix)
+	static void Patch(Harmony harmony, Type targetType, string target, string patchMethod, bool prefix)
 	{
-		var method = AccessTools.Method(typeof(WorldGeneration), target);
+		var method = AccessTools.Method(targetType, target);
 		if (method == null)
 		{
 			Log.LogError("CS: target method not found: " + target);

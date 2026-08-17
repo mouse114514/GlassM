@@ -1,3 +1,4 @@
+using System;
 using HarmonyLib;
 using UnityEngine;
 
@@ -56,6 +57,25 @@ public static class Patches
 	static void Update_Postfix()
 	{
 		ChunkStreamer.Tick();
+	}
+
+	// 出生点放置:诊断(原版 Physics2D 扫描出生腔)
+	[HarmonyPatch(typeof(Body), "PlaceBody")]
+	[HarmonyPrefix]
+	static bool PlaceBody_Prefix(Body __instance)
+	{
+		try
+		{
+			Plugin.Log.LogInfo("CS: PlaceBody diag worldNull=" + (WorldGeneration.world == null)
+				+ " biome=" + (WorldGeneration.world != null ? WorldGeneration.world.biomeOverride.ToString() : "?")
+				+ " cam=" + (PlayerCamera.main != null) + " body=" + (PlayerCamera.main != null && PlayerCamera.main.body != null)
+				+ " spawn=" + (GameObject.Find("TUTORIALSPAWN") != null));
+		}
+		catch (Exception e)
+		{
+			Plugin.Log.LogInfo("CS: PlaceBody diag err " + e.Message);
+		}
+		return true;
 	}
 
 	// 层过渡/重开世界时清状态
