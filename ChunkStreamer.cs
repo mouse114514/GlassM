@@ -43,7 +43,6 @@ public static class ChunkStreamer
 	static readonly List<Vector2Int> pendingFull = new List<Vector2Int>(); // 初始只生成地形的块,待补实体/矿物/液体
 
 	// 渲染复用数组(RenderChunk 每帧多次调用,避免反复分配)
-	static readonly Vector3Int[] renderPos = new Vector3Int[CS * CS];
 	static readonly TileBase[] renderTiles = new TileBase[CS * CS];
 
 	// 结构资源缓存(Resources.Load 结果,避免每块重复加载)
@@ -71,7 +70,7 @@ public static class ChunkStreamer
 	public const int GEN_RADIUS = 5;     // 生成半径(区块),11x11
 	public const int UNLOAD_RADIUS = 7;  // 卸载半径(区块),超出关闭 collider
 	public const int INIT_RADIUS = 1;    // 初始同步生成半径,3x3
-	public const int BUDGET_MS = 6;      // 每帧区块生成/补全的毫秒预算(时间盒)
+	public const int MAX_PER_FRAME = 4;  // 每帧后台生成区块数上限
 
 	public static Vector2Int PlayerChunk = new Vector2Int(8, 8);
 	static Vector2Int lastScanChunk = new Vector2Int(int.MinValue, int.MinValue); // 上次卸载扫描的玩家块
@@ -284,30 +283,32 @@ public static class ChunkStreamer
 				}
 			}
 		}
-		// 时间盒:每帧最多花 BUDGET_MS 在区块生成/补全上(不再固定块数,
-		// 快速移动时按耗时动态调整,避免单帧生成过多导致掉帧)
-		var sw = System.Diagnostics.Stopwatch.StartNew();
-		// 补全初始块(实体/矿物/液体)优先,通常量小
-		while (pendingFull.Count > 0 && sw.ElapsedMilliseconds < BUDGET_MS)
+		// 补全初始块(实体/矿物/液体)
+		if (pendingFull.Count > 0)
 		{
-			Vector2Int c = pendingFull[0];
-			pendingFull.RemoveAt(0);
-			try
+			int n = Mathf.Min(MAX_PER_FRAME, pendingFull.Count);
+			for (int i = 0; i < n; i++)
 			{
-				GenChunkOres(c);
-				GenChunkLiquids(c);
-				GenChunkEntities(c);
-			}
-			catch (Exception e)
-			{
-				Plugin.Log.LogWarning("chunk full gen failed " + c + ": " + e);
+				Vector2Int c = pendingFull[0];
+				pendingFull.RemoveAt(0);
+				try
+				{
+					GenChunkOres(c);
+					GenChunkLiquids(c);
+					GenChunkEntities(c);
+				}
+				catch (Exception e)
+				{
+					Plugin.Log.LogWarning("chunk full gen failed " + c + ": " + e);
+				}
 			}
 		}
 		// 生成最近的新块
 		if (queue.Count > 0)
 		{
 			if (added) queue.Sort((a, b) => Dist2(a, pc).CompareTo(Dist2(b, pc)));
-			while (queue.Count > 0 && sw.ElapsedMilliseconds < BUDGET_MS)
+			int n = Mathf.Min(MAX_PER_FRAME, queue.Count);
+			for (int i = 0; i < n; i++)
 			{
 				GenChunk(queue[0]);
 				queue.RemoveAt(0);
@@ -389,18 +390,16 @@ static void RenderChunk(Vector2Int c)
 		Tilemap tm = CH[c.x, c.y];
 		if (tm == null) return;
 		int bx = c.x * CS, by = c.y * CS;
-		int n = CS * CS;
 		int half = W.HALFCHUNKSIZE;
-		for (int i = 0; i < CS; i++)
+		// 按 row-major 填充(SetTilesBlock 比 SetTiles 快:直接写网格,
+		// 跳过 Unity 的 tile 缓存字典查找;要求数组覆盖整块、从 origin 起)
+		int idx = 0;
+		for (int j = 0; j < CS; j++)
 		{
-			for (int j = 0; j < CS; j++)
-			{
-				int idx = j * CS + i;
-				renderPos[idx] = new Vector3Int(i - half, j - half, 0);
-				renderTiles[idx] = W.tiles[WB[bx + i, by + j]];
-			}
+			for (int i = 0; i < CS; i++)
+				renderTiles[idx++] = W.tiles[WB[bx + i, by + j]];
 		}
-		tm.SetTiles(renderPos, renderTiles);
+		tm.SetTilesBlock(new BoundsInt(-half, -half, 0, CS, CS, 1), renderTiles);
 	}
 
 	// ===== 结构生成(照搬原版 WorldGenerateStructures/GenerateDropCapsules/
@@ -715,9 +714,10 @@ static void RenderChunk(Vector2Int c)
 						block = (ushort)(noise < -0.33f ? 16 : 2);
 					if (block > 0 && UnityEngine.Random.Range(0f, 1f) > 0.99f)
 						block = (ushort)UnityEngine.Random.Range(1, 5);
-					if (biomeMap.GetNoise(x, y) > 0.1f)
+					float bm = biomeMap.GetNoise(x, y);
+					if (bm > 0.1f)
 						block = (ushort)UnityEngine.Random.Range(3, 5);
-					if (block > 0 && biomeMap.GetNoise(x, y) < -0.8f)
+					if (block > 0 && bm < -0.8f)
 						block = 15;
 					if (biome == 1 && y < W.height * 0.5f)
 					{
@@ -766,11 +766,17 @@ static void RenderChunk(Vector2Int c)
 		}
 		else
 		{
+			float lastFreq = float.NaN;
 			for (int x = bx; x < bx + CS; x++)
 			{
 				for (int y = by; y < by + CS; y++)
 				{
-					marbleMap.SetFrequency(0.0189f - y / (float)W.height * 0.002f);
+					float freq = 0.0189f - y / (float)W.height * 0.002f;
+					if (freq != lastFreq)
+					{
+						marbleMap.SetFrequency(freq);
+						lastFreq = freq;
+					}
 					float num31 = marbleMap.GetNoise(x, y) + UnityEngine.Random.Range(-0.1f, 0.1f);
 					ushort block;
 					if (num31 > 0.15f && num31 < 0.25f) block = 23;
