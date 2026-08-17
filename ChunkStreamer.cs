@@ -71,7 +71,7 @@ public static class ChunkStreamer
 	public const int GEN_RADIUS = 5;     // 生成半径(区块),11x11
 	public const int UNLOAD_RADIUS = 7;  // 卸载半径(区块),超出关闭 collider
 	public const int INIT_RADIUS = 1;    // 初始同步生成半径,3x3
-	public const int MAX_PER_FRAME = 4;  // 每帧后台生成区块数上限
+	public const int BUDGET_MS = 6;      // 每帧区块生成/补全的毫秒预算(时间盒)
 
 	public static Vector2Int PlayerChunk = new Vector2Int(8, 8);
 	static Vector2Int lastScanChunk = new Vector2Int(int.MinValue, int.MinValue); // 上次卸载扫描的玩家块
@@ -284,35 +284,33 @@ public static class ChunkStreamer
 				}
 			}
 		}
-		// 优先生成最近的(仅当有新块入队时才排序)
+		// 时间盒:每帧最多花 BUDGET_MS 在区块生成/补全上(不再固定块数,
+		// 快速移动时按耗时动态调整,避免单帧生成过多导致掉帧)
+		var sw = System.Diagnostics.Stopwatch.StartNew();
+		// 补全初始块(实体/矿物/液体)优先,通常量小
+		while (pendingFull.Count > 0 && sw.ElapsedMilliseconds < BUDGET_MS)
+		{
+			Vector2Int c = pendingFull[0];
+			pendingFull.RemoveAt(0);
+			try
+			{
+				GenChunkOres(c);
+				GenChunkLiquids(c);
+				GenChunkEntities(c);
+			}
+			catch (Exception e)
+			{
+				Plugin.Log.LogWarning("chunk full gen failed " + c + ": " + e);
+			}
+		}
+		// 生成最近的新块
 		if (queue.Count > 0)
 		{
 			if (added) queue.Sort((a, b) => Dist2(a, pc).CompareTo(Dist2(b, pc)));
-			int n = Mathf.Min(MAX_PER_FRAME, queue.Count);
-			for (int i = 0; i < n; i++)
+			while (queue.Count > 0 && sw.ElapsedMilliseconds < BUDGET_MS)
 			{
 				GenChunk(queue[0]);
 				queue.RemoveAt(0);
-			}
-		}
-		// 补全初始块(实体/矿物/液体)
-		if (pendingFull.Count > 0)
-		{
-			int n = Mathf.Min(MAX_PER_FRAME, pendingFull.Count);
-			for (int i = 0; i < n; i++)
-			{
-				Vector2Int c = pendingFull[0];
-				pendingFull.RemoveAt(0);
-				try
-				{
-					GenChunkOres(c);
-					GenChunkLiquids(c);
-					GenChunkEntities(c);
-				}
-				catch (Exception e)
-				{
-					Plugin.Log.LogWarning("chunk full gen failed " + c + ": " + e);
-				}
 			}
 		}
 		// 卸载:超出卸载半径的区块关闭 collider;回到半径内恢复。
