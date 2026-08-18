@@ -82,9 +82,9 @@ public static class ChunkStreamer
 
 	private static readonly System.Random terrainRng = new System.Random(12345);
 
-	public const int GEN_RADIUS = 5;
+	public const int GEN_RADIUS = 6;
 
-	public const int UNLOAD_RADIUS = 7;
+	public const int UNLOAD_RADIUS = 9;
 
 	public const int INIT_RADIUS = 1;
 
@@ -456,9 +456,9 @@ public static class ChunkStreamer
 		if (StreamOn && pc != lastEnqueueChunk)
 		{
 			lastEnqueueChunk = pc;
-			for (int i = pc.x - 5; i <= pc.x + 5; i++)
+			for (int i = pc.x - GEN_RADIUS; i <= pc.x + GEN_RADIUS; i++)
 			{
-				for (int j = pc.y - 5; j <= pc.y + 5; j++)
+				for (int j = pc.y - GEN_RADIUS; j <= pc.y + GEN_RADIUS; j++)
 				{
 					if (i >= 0 && j >= 0 && i <= 15 && j <= 15 && !genData[i, j] && !inQueue[i, j])
 					{
@@ -515,7 +515,7 @@ public static class ChunkStreamer
 					{
 						continue;
 					}
-					bool flag2 = Dist2(new Vector2Int(m, n), pc) > 49;
+					bool flag2 = Dist2(new Vector2Int(m, n), pc) > UNLOAD_RADIUS * UNLOAD_RADIUS;
 					if (flag2 != colliderOn[m, n])
 					{
 						continue;
@@ -722,7 +722,7 @@ public static class ChunkStreamer
 		int num = c.x * CS;
 		int num2 = c.y * CS;
 		int hALFCHUNKSIZE = W.HALFCHUNKSIZE;
-		if (Dist2(c, PlayerChunk) > 49)
+		if (Dist2(c, PlayerChunk) > UNLOAD_RADIUS * UNLOAD_RADIUS)
 		{
 			dirtyRender[c.x, c.y] = true;
 			return;
