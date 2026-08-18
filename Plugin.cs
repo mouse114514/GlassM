@@ -24,9 +24,16 @@ public sealed class Plugin : BaseUnityPlugin
 			Patch(harmony, typeof(WorldGeneration), "UpdateWorld", "UpdateWorld_Prefix", prefix: true);
 			Patch(harmony, typeof(WorldGeneration), "WorldPlaceEntities", "WorldPlaceEntities_Prefix", prefix: true);
 			Patch(harmony, typeof(WorldGeneration), "WorldGenerateStructures", "WorldGenerateStructures_Prefix", prefix: true);
+			Patch(harmony, typeof(WorldGeneration), "Update", "Update_Prefix", prefix: true);
 			Patch(harmony, typeof(WorldGeneration), "Update", "Update_Postfix", prefix: false);
 			Patch(harmony, typeof(WorldGeneration), "Clear", "Clear_Postfix", prefix: false);
 			Patch(harmony, typeof(Body), "PlaceBody", "PlaceBody_Prefix", prefix: true);
+			Patch(harmony, typeof(FluidManager), "Update", "FluidUpdate_Prefix", prefix: true);
+			Patch(harmony, typeof(FluidManager), "Update", "FluidUpdate_Postfix", prefix: false);
+			Patch(harmony, typeof(FluidManager), "FixedUpdate", "FluidFixedUpdate_Prefix", prefix: true);
+			Patch(harmony, typeof(FluidManager), "FixedUpdate", "FluidFixedUpdate_Postfix", prefix: false);
+			Patch(harmony, typeof(Body), "Update", "BodyUpdate_Prefix", prefix: true);
+			Patch(harmony, typeof(Body), "Update", "BodyUpdate_Postfix", prefix: false);
 			Logger.LogInfo((object)"GlassM: patches applied");
 		}
 		catch (Exception ex)
