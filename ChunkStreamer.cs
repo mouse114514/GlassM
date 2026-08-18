@@ -80,11 +80,15 @@ public static class ChunkStreamer
 
 	private static int diagApplyCount;
 
+	private static bool structPlaced;
+
 	private static readonly System.Random terrainRng = new System.Random(12345);
 
 	public const int GEN_RADIUS = 6;
 
 	public const int UNLOAD_RADIUS = 6;
+
+	public const int RENDER_RADIUS = 7;
 
 	public const int INIT_RADIUS = 1;
 
@@ -693,10 +697,13 @@ public static class ChunkStreamer
 			RenderChunk(c);
 			diagRenderMs += stopwatch3.ElapsedMilliseconds;
 			Stopwatch stopwatch4 = Stopwatch.StartNew();
-			GenChunkStructures(c);
+			bool flagStruct = GenChunkStructures(c);
 			diagStructMs += stopwatch4.ElapsedMilliseconds;
 			Stopwatch stopwatch5 = Stopwatch.StartNew();
-			RefreshAround(c);
+			if (flagStruct)
+			{
+				RefreshAround(c);
+			}
 			diagRefreshMs += stopwatch5.ElapsedMilliseconds;
 			diagApplyMs += stopwatch.ElapsedMilliseconds;
 			diagApplyCount++;
@@ -709,11 +716,8 @@ public static class ChunkStreamer
 		}
 	}
 
-	private static void RenderChunk(Vector2Int c)
+	private static void RenderChunk(Vector2Int c, bool force = false)
 	{
-		//IL_0053: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0054: Unknown result type (might be due to invalid IL or missing references)
-		//IL_00fb: Unknown result type (might be due to invalid IL or missing references)
 		Tilemap val = CH[c.x, c.y];
 		if ((Object)(object)val == (Object)null)
 		{
@@ -722,7 +726,7 @@ public static class ChunkStreamer
 		int num = c.x * CS;
 		int num2 = c.y * CS;
 		int hALFCHUNKSIZE = W.HALFCHUNKSIZE;
-		if (Math.Max(Math.Abs(c.x - PlayerChunk.x), Math.Abs(c.y - PlayerChunk.y)) > UNLOAD_RADIUS)
+		if (!force && Math.Max(Math.Abs(c.x - PlayerChunk.x), Math.Abs(c.y - PlayerChunk.y)) > RENDER_RADIUS)
 		{
 			dirtyRender[c.x, c.y] = true;
 			return;
@@ -787,59 +791,29 @@ public static class ChunkStreamer
 
 	private static void RefreshAround(Vector2Int c)
 	{
-		for (int i = c.x - 1; i <= c.x + 1; i++)
+		for (int i = c.x - 2; i <= c.x + 2; i++)
 		{
-			for (int j = c.y - 1; j <= c.y + 1; j++)
+			for (int j = c.y - 2; j <= c.y + 2; j++)
 			{
 				if (i >= 0 && j >= 0 && i <= 15 && j <= 15 && genApplied[i, j])
 				{
-					RenderChunk(new Vector2Int(i, j));
+					RenderChunk(new Vector2Int(i, j), force: true);
 				}
 			}
 		}
 	}
 
-	private static void GenChunkStructures(Vector2Int c)
+	private static bool GenChunkStructures(Vector2Int c)
 	{
-		//IL_0006: Unknown result type (might be due to invalid IL or missing references)
-		//IL_000c: Invalid comparison between Unknown and I4
-		//IL_0057: Unknown result type (might be due to invalid IL or missing references)
-		//IL_00ec: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0121: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0137: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0154: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0170: Unknown result type (might be due to invalid IL or missing references)
-		//IL_018c: Unknown result type (might be due to invalid IL or missing references)
-		//IL_01a8: Unknown result type (might be due to invalid IL or missing references)
-		//IL_01c4: Unknown result type (might be due to invalid IL or missing references)
-		//IL_01fb: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0211: Unknown result type (might be due to invalid IL or missing references)
-		//IL_022d: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0249: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0265: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0281: Unknown result type (might be due to invalid IL or missing references)
-		//IL_02c0: Unknown result type (might be due to invalid IL or missing references)
-		//IL_02c1: Unknown result type (might be due to invalid IL or missing references)
-		//IL_02dd: Unknown result type (might be due to invalid IL or missing references)
-		//IL_02f8: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0314: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0330: Unknown result type (might be due to invalid IL or missing references)
-		//IL_034c: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0368: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0384: Unknown result type (might be due to invalid IL or missing references)
-		//IL_039a: Unknown result type (might be due to invalid IL or missing references)
-		//IL_03a2: Unknown result type (might be due to invalid IL or missing references)
-		//IL_03c6: Unknown result type (might be due to invalid IL or missing references)
-		//IL_03ef: Unknown result type (might be due to invalid IL or missing references)
-		//IL_03f0: Unknown result type (might be due to invalid IL or missing references)
+		structPlaced = false;
 		if ((int)W.biomeOverride > 0)
 		{
-			return;
+			return false;
 		}
 		int biomeDepth = W.biomeDepth;
 		if (biomeDepth > 4)
 		{
-			return;
+			return false;
 		}
 		try
 		{
@@ -889,6 +863,7 @@ public static class ChunkStreamer
 				{
 					if (GroundAbove(RandPosInChunk(c), out var ground, 64f))
 					{
+						structPlaced = true;
 						W.GenerateTree(ground);
 					}
 				}
@@ -911,6 +886,7 @@ public static class ChunkStreamer
 			Vector2Int val = c;
 			log.LogWarning((object)("chunk structures failed " + val.ToString() + ": " + ex));
 		}
+		return structPlaced;
 	}
 
 	private static void DropCapsuleAt(Vector2Int c)
@@ -933,6 +909,7 @@ public static class ChunkStreamer
 		{
 			val = W.BlockToWorldPos(ground);
 		}
+		structPlaced = true;
 		Object.Instantiate<GameObject>(GetStructObj("dropcapsule"), (Vector2)(val), Quaternion.Euler(0f, 0f, Random.Range(0f, 360f))).GetComponent<AudioSource>().pitch = Random.Range(0.9f, 1.1f);
 		W.GenerateBlockCircle(val, 32, (ushort)3, 0.7f, 0f, false, false, false);
 		W.GenerateBlockCircle(val, 30, (ushort)6, 0.04f, 0.04f, false, false, false);
@@ -976,6 +953,7 @@ public static class ChunkStreamer
 		}
 		Vector2Int val2 = W.WorldToBlockPos(val);
 		CraterAt(val, val2);
+		structPlaced = true;
 		W.GenerateObjectAtPos(val2, ((Component)GetStruct("LifepodCollapsed").transform.GetChild(0)).GetComponent<Tilemap>(), 0.88f, true);
 		if (Random.value < 0.9f)
 		{
@@ -1087,6 +1065,7 @@ public static class ChunkStreamer
 		}
 		Vector2Int val2 = W.WorldToBlockPos(val);
 		CraterAt(val, val2);
+		structPlaced = true;
 		W.GenerateObjectAtPos(val2, ((Component)GetStruct("Lifepod").transform.GetChild(0)).GetComponent<Tilemap>(), 0.95f, true);
 		W.GenerateEntityAtPos(W.BlockToWorldPos(val2), GetStruct("Lifepod"));
 		if (Random.value < WorldGeneration.GetRunSettingFloat("traderchance") * 0.01f)
@@ -1207,7 +1186,8 @@ public static class ChunkStreamer
 			W.GenerateBlockCircle(val, 16, (ushort)3, 0.8f, 0f, false, false, false);
 			W.GenerateBlockCircle(val, 20, (ushort)4, 0.3f, 0f, false, false, false);
 			W.GenerateBlockCircle(val, 16, (ushort)0, 0.15f, 0f, false, false, false);
-			W.GenerateObjectAtPos(ground, ((Component)GetStruct("BioContainer").transform.GetChild(0)).GetComponent<Tilemap>(), chance, true);
+			structPlaced = true;
+		W.GenerateObjectAtPos(ground, ((Component)GetStruct("BioContainer").transform.GetChild(0)).GetComponent<Tilemap>(), chance, true);
 			W.GenerateEntityAtPos(W.BlockToWorldPos(ground), GetStruct("BioContainer"));
 		}
 	}
@@ -1232,7 +1212,8 @@ public static class ChunkStreamer
 			{
 				val = W.BlockToWorldPos(ground);
 			}
-			W.GenerateObjectAtPos(W.WorldToBlockPos(val), GetStruct(res).GetComponent<Tilemap>(), chance, true);
+			structPlaced = true;
+		W.GenerateObjectAtPos(W.WorldToBlockPos(val), GetStruct(res).GetComponent<Tilemap>(), chance, true);
 			W.GenerateEntityAtPos(val, GetStruct(res));
 		}
 	}
@@ -1261,6 +1242,7 @@ public static class ChunkStreamer
 			}
 			W.GenerateBlockCircle(val, 16, (ushort)3, 0.5f, 0f, false, false, false);
 			W.GenerateBlockCircle(val, 20, (ushort)4, 0.2f, 0f, false, false, false);
+			structPlaced = true;
 			W.GenerateObjectAtPos(ground, GetStruct(res).GetComponent<Tilemap>(), chance, true);
 			if (entity)
 			{
