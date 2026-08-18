@@ -787,10 +787,15 @@ public static class ChunkStreamer
 
 	private static void RefreshAround(Vector2Int c)
 	{
-		//IL_001d: Unknown result type (might be due to invalid IL or missing references)
-		if (genData[c.x, c.y])
+		for (int i = c.x - 1; i <= c.x + 1; i++)
 		{
-			RenderChunk(c);
+			for (int j = c.y - 1; j <= c.y + 1; j++)
+			{
+				if (i >= 0 && j >= 0 && i <= 15 && j <= 15 && genApplied[i, j])
+				{
+					RenderChunk(new Vector2Int(i, j));
+				}
+			}
 		}
 	}
 
