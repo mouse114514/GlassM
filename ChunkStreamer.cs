@@ -741,12 +741,16 @@ public static class ChunkStreamer
 
 	private static int Poisson(float lambda)
 	{
-		int num = 0;
-		while (Random.value < lambda)
+		float num = (float)Math.Exp(0f - lambda);
+		int num2 = 0;
+		float num3 = 1f;
+		do
 		{
-			num++;
+			num2++;
+			num3 *= Random.value;
 		}
-		return num;
+		while (num3 > num && num2 < 1000);
+		return num2 - 1;
 	}
 
 	private static bool GroundAbove(Vector2 pos, out Vector2Int ground, float maxDist = 400f)
@@ -889,8 +893,6 @@ public static class ChunkStreamer
 				PodAt(c, 0.03f, 0.05f, "Structures/WoodHorizontal", 0.95f, entity: false);
 				PodAt(c, 0.04f, 0.05f, "Structures/BrickLoot", 0.925f);
 				BioContainerAt(c, 0.03f, 0.04f, 0.975f);
-				IronVein(c, 1);
-				IronVein(c, 2);
 			}
 			num = Poisson(Random.Range(0.088f, 0.1f));
 			for (int l = 0; l < num; l++)
@@ -1395,60 +1397,80 @@ public static class ChunkStreamer
 
 	private static void GenChunkOres(Vector2Int c)
 	{
-		//IL_01cd: Unknown result type (might be due to invalid IL or missing references)
-		//IL_01e9: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0209: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0226: Unknown result type (might be due to invalid IL or missing references)
 		ushort[,] wB = WB;
+		int num = Poisson(0.5f);
+		for (int i = 0; i < num; i++)
+		{
+			int num2 = c.x * CS + Random.Range(0, CS);
+			int num3 = c.y * CS + Random.Range(0, CS);
+			for (int num4 = Random.Range(1, 26); num4 > 0; num4--)
+			{
+				if (num2 > 0 && num2 < W.width - 1 && num3 > 0 && num3 < W.height - 1 && wB[num2, num3] > 0)
+				{
+					wB[num2, num3] = 34;
+				}
+				num2 += (Random.value > 0.5f) ? ((Random.value > 0.5f) ? 1 : (-1)) : 0;
+				num3 += (Random.value > 0.5f) ? ((Random.value > 0.5f) ? 1 : (-1)) : 0;
+			}
+		}
+		if (biome == 0)
+		{
+			VeinChunk(c, Random.Range(0.35f, 0.4f), 11, 2, 6, 48, horizontal: true);
+			VeinChunk(c, Random.Range(0.35f, 0.4f), 11, 2, 6, 48, horizontal: false);
+			return;
+		}
+		if (biome == 1)
+		{
+			VeinChunk(c, Random.Range(0.35f, 0.5f), 5, 3, 6, 64, horizontal: true);
+			VeinChunk(c, Random.Range(0.35f, 0.5f), 5, 3, 6, 60, horizontal: false);
+			return;
+		}
+		if (biome == 2 || biome == 3)
+		{
+			VeinChunk(c, Random.Range(0.25f, 0.3f), 11, 2, 6, 48, horizontal: true);
+			VeinChunk(c, Random.Range(0.24f, 0.3f), 11, 2, 6, 48, horizontal: false);
+			if (biome == 3)
+			{
+				VeinChunkSquare(c, 0.5f, 0.6f, 20, 4, 16);
+			}
+			return;
+		}
 		if (biome == 4)
 		{
 			for (int i = 0; i < 4; i++)
 			{
 				if (Random.value < 0.00025f)
 				{
-					int num = c.x * CS + Random.Range(0, CS);
-					int num2 = c.y * CS + Random.Range(0, CS);
-					if (wB[num, num2] > 0)
+					int num5 = c.x * CS + Random.Range(0, CS);
+					int num6 = c.y * CS + Random.Range(0, CS);
+					if (wB[num5, num6] > 0)
 					{
-						wB[num, num2] = 35;
+						wB[num5, num6] = 35;
 					}
 				}
 			}
 		}
-		else
+	}
+
+	private static void VeinChunkSquare(Vector2Int c, float amtMin, float amtMax, ushort block, int sizeMin, int sizeMax)
+	{
+		int num = Poisson(Random.Range(amtMin, amtMax));
+		for (int i = 0; i < num; i++)
 		{
-			if (Random.value >= 0.5f)
+			int num2 = c.x * CS + Random.Range(0, CS);
+			int num3 = c.y * CS + Random.Range(0, CS);
+			int num4 = Random.Range(sizeMin, sizeMax);
+			for (int j = 0; j < num4; j++)
 			{
-				return;
-			}
-			int num3 = c.x * CS + Random.Range(0, CS);
-			int num4 = c.y * CS + Random.Range(0, CS);
-			if (wB[num3, num4] == 0)
-			{
-				return;
-			}
-			for (int num5 = Random.Range(1, 26); num5 > 0; num5--)
-			{
-				if (wB[num3, num4] > 0)
+				for (int k = 0; k < num4; k++)
 				{
-					wB[num3, num4] = 34;
+					int num5 = num2 + j;
+					int num6 = num3 + k;
+					if (num5 < W.width && num6 < W.height)
+					{
+						WB[num5, num6] = block;
+					}
 				}
-				num3 += ((Random.value > 0.5f) ? ((Random.value > 0.5f) ? 1 : (-1)) : 0);
-				num4 += ((Random.value > 0.5f) ? ((Random.value > 0.5f) ? 1 : (-1)) : 0);
-				if (num3 < 0 || num4 < 0 || num3 >= W.width || num4 >= W.height)
-				{
-					break;
-				}
-			}
-			if (W.biomeDepth > 0)
-			{
-				VeinChunk(c, Random.Range(0.35f, 0.5f), 5, 3, 6, 64, horizontal: true);
-				VeinChunk(c, Random.Range(0.35f, 0.5f), 5, 3, 6, 60, horizontal: false);
-			}
-			else
-			{
-				VeinChunk(c, Random.Range(0.35f, 0.4f), 11, 2, 6, 48, horizontal: true);
-				VeinChunk(c, Random.Range(0.35f, 0.4f), 11, 2, 6, 48, horizontal: false);
 			}
 		}
 	}
@@ -1770,6 +1792,12 @@ public static class ChunkStreamer
 			D(c, "geotree", 2.7f, 3f, 3f, 6f, 0.15f, inGround: false, flip: true, SoilCheck);
 			D(c, "hydreed", 1.4f, 1.6f, 2.6f, 6f, 0.4f, inGround: false, flip: true, SoilCheck);
 			D(c, "leadbush", 2f, 2.2f, 0.6f, 6f, 0.1f, inGround: false, flip: true, SoilCheck);
+			DistributeLoose(c, "bandage", 0.2f * totalLootRarity, 0.3f * totalLootRarity, true, Vector2.down, true, true);
+			DistributeLoose(c, "droppings", 0.3f, 0.5f, true, Vector2.down, false, false);
+			if (biome == 0)
+			{
+				DistributeLoose(c, "fleshchunk", 0.015f * totalLootRarity, 0.02f * totalLootRarity, true, Vector2.down, true, false);
+			}
 			return;
 		}
 		if (biome == 2 || biome == 3)
@@ -1803,6 +1831,9 @@ public static class ChunkStreamer
 			}
 			D(c, "rag", 0.12f * lootRarityMultiplier * ((biome == 2) ? 1f : 2.5f), 0.2f * lootRarityMultiplier * ((biome == 2) ? 1f : 2.5f), 1f);
 			D(c, "corpse", 0.75f * lootRarityMultiplier * ((biome == 2) ? 1f : 2f), 0.82f * lootRarityMultiplier * ((biome == 2) ? 1f : 2f), 0f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
+			DistributeLoose(c, "oilpipe", 0.3f, 0.4f, false, Vector2.down, true, false);
+			DistributeLoose(c, "turret", 0.12f * totalTrapRarity * ((biome == 2) ? 1f : 0.66f), 0.15f * totalTrapRarity * ((biome == 2) ? 1f : 0.66f), true, (Random.value > 0.5f) ? Vector2.right : Vector2.left, false, false);
+			DistributeLoose(c, "stalactite", 1.5f * totalTrapRarity, 2f * totalTrapRarity, true, Vector2.up, false, false);
 			return;
 		}
 		D(c, "glowplant", 0.2f, 0.3f, 1.25f, 10f, 0.25f, inGround: false, flip: true, SoilCheck);
@@ -1836,6 +1867,7 @@ public static class ChunkStreamer
 		D(c, "grabberplant", 0.4f * totalTrapRarity, 0.5f * totalTrapRarity);
 		D(c, "geyser", 0.7f, 0.8f, 0.6f, 0f, 0f, inGround: false, flip: false, SoftCheck);
 		D(c, "skullcrusher", 1.1f, 1.2f, 1f, 10f, 0f, inGround: false, flip: true, null, Vector2.up);
+		DistributeLoose(c, "wallflower", 6f, 7f, false, Vector2.down, true, false);
 	}
 
 	private static bool FindSurface(int wx, int wy, Vector2 dir, out int hx, out int hy)
@@ -1893,6 +1925,52 @@ public static class ChunkStreamer
 	{
 		ushort num = WB[bx, by];
 		return num == 2 || num == 15 || num == 16 || num == 23 || (num > 30 && num < 34);
+	}
+
+	private static void DistributeLoose(Vector2Int c, string name, float min, float max, bool surface, Vector2 dir, bool rotate, bool setCondition)
+	{
+		float num = Random.Range(min, max);
+		int num2 = (int)num;
+		if (Random.value < num - (float)num2)
+		{
+			num2++;
+		}
+		int num3 = c.x * CS;
+		int num4 = c.y * CS;
+		for (int i = 0; i < num2; i++)
+		{
+			int num5 = num3 + Random.Range(0, CS);
+			int num6 = num4 + Random.Range(0, CS);
+			int hx;
+			int hy;
+			if (surface)
+			{
+				if (WB[num5, num6] > 0 || !FindSurface(num5, num6, dir, out hx, out hy))
+				{
+					continue;
+				}
+			}
+			else
+			{
+				hx = num5;
+				hy = num6;
+			}
+			GameObject structObj = GetStructObj(name);
+			if ((Object)(object)structObj == (Object)null)
+			{
+				continue;
+			}
+			Vector2 vector = new Vector2((float)hx + 0.5f, (float)hy + 1f);
+			GameObject val2 = Object.Instantiate<GameObject>(structObj, (Vector2)(vector), Quaternion.Euler(0f, 0f, rotate ? Random.Range(-180f, 180f) : 0f));
+			if (setCondition)
+			{
+				Item item = val2.GetComponent<Item>();
+				if ((Object)(object)item != (Object)null)
+				{
+					item.condition = Random.Range(1, 4) * 0.33f;
+				}
+			}
+		}
 	}
 
 	private static void D(Vector2Int c, string name, float min, float max, float yOff = 0f, float rot = 0f, float yDev = 0f, bool inGround = false, bool flip = false, Func<int, int, bool> check = null, Vector2 dir = default(Vector2))
