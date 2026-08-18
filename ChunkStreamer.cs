@@ -66,16 +66,6 @@ public static class ChunkStreamer
 
 	private static readonly TileBase[] renderTiles = (TileBase[])(object)new TileBase[CS * CS];
 
-	private static readonly object terrLock = new object();
-
-	private static readonly Queue<Vector2Int> terrJobs = new Queue<Vector2Int>();
-
-	private static readonly Queue<KeyValuePair<Vector2Int, ushort[,]>> terrDone = new Queue<KeyValuePair<Vector2Int, ushort[,]>>();
-
-	private static Thread terrThread;
-
-	private static volatile bool terrStop;
-
 	private static readonly Dictionary<string, GameObject> structRes = new Dictionary<string, GameObject>();
 
 	private static long diagApplyMs;
@@ -123,67 +113,6 @@ public static class ChunkStreamer
 	public static Tilemap[,] CH => (Tilemap[,])f_chunks.GetValue(W);
 
 	public static int QueueCount => queue.Count;
-
-	private static void EnsureTerrainThread()
-	{
-		if (terrThread == null)
-		{
-			terrStop = false;
-			terrThread = new Thread(TerrainWorkerLoop);
-			terrThread.IsBackground = true;
-			terrThread.Start();
-		}
-	}
-
-	private static void TerrainWorkerLoop()
-	{
-		//IL_0009: Unknown result type (might be due to invalid IL or missing references)
-		//IL_003c: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0041: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0079: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0091: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0092: Unknown result type (might be due to invalid IL or missing references)
-		//IL_00d8: Unknown result type (might be due to invalid IL or missing references)
-		//IL_010f: Unknown result type (might be due to invalid IL or missing references)
-		while (!terrStop)
-		{
-			Vector2Int val = default(Vector2Int);
-			bool flag;
-			lock (terrLock)
-			{
-				flag = terrJobs.Count > 0;
-				if (flag)
-				{
-					val = terrJobs.Dequeue();
-				}
-			}
-			if (!flag)
-			{
-				Thread.Sleep(1);
-				continue;
-			}
-			ushort[,] array = new ushort[CS, CS];
-			try
-			{
-				GenChunkTerrainInto(val, array);
-			}
-			catch (Exception ex)
-			{
-				ManualLogSource log = Plugin.Log;
-				Vector2Int val2 = val;
-				log.LogWarning((object)("terrain worker failed " + val2.ToString() + ": " + ex));
-				lock (terrLock)
-				{
-					terrDone.Enqueue(new KeyValuePair<Vector2Int, ushort[,]>(val, array));
-				}
-				continue;
-			}
-			lock (terrLock)
-			{
-				terrDone.Enqueue(new KeyValuePair<Vector2Int, ushort[,]>(val, array));
-			}
-		}
-	}
 
 	private static GameObject GetStruct(string name)
 	{
@@ -245,11 +174,6 @@ public static class ChunkStreamer
 		Array.Clear(dirtyRender, 0, dirtyRender.Length);
 		queue.Clear();
 		pendingFull.Clear();
-		lock (terrLock)
-		{
-			terrJobs.Clear();
-			terrDone.Clear();
-		}
 	}
 
 	private static bool InWorld(Vector2Int c)
@@ -441,49 +365,24 @@ public static class ChunkStreamer
 
 	private static void SyncGenAndWait(Vector2Int cc)
 	{
-		//IL_008d: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0106: Unknown result type (might be due to invalid IL or missing references)
-		//IL_010b: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0118: Unknown result type (might be due to invalid IL or missing references)
-		//IL_012b: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0136: Unknown result type (might be due to invalid IL or missing references)
-		//IL_014f: Unknown result type (might be due to invalid IL or missing references)
 		if (genData[cc.x, cc.y] || genApplied[cc.x, cc.y])
 		{
 			return;
 		}
 		genData[cc.x, cc.y] = true;
 		genFull[cc.x, cc.y] = false;
-		EnsureTerrainThread();
-		lock (terrLock)
+		ushort[,] array = new ushort[CS, CS];
+		try
 		{
-			terrJobs.Enqueue(cc);
+			GenChunkTerrainInto(cc, array);
 		}
-		for (int i = 0; i < 200; i++)
+		catch (Exception ex)
 		{
-			bool flag;
-			KeyValuePair<Vector2Int, ushort[,]> keyValuePair;
-			lock (terrLock)
-			{
-				flag = terrDone.Count > 0;
-				keyValuePair = ((!flag) ? default(KeyValuePair<Vector2Int, ushort[,]>) : terrDone.Dequeue());
-			}
-			if (flag)
-			{
-				if (keyValuePair.Key == cc)
-				{
-					ApplyChunk(cc, keyValuePair.Value);
-					pendingFull.Add(cc);
-					break;
-				}
-				ApplyChunk(keyValuePair.Key, keyValuePair.Value);
-				pendingFull.Add(keyValuePair.Key);
-			}
-			else
-			{
-				Thread.Sleep(1);
-			}
+			Plugin.Log.LogWarning((object)("sync gen failed " + cc.ToString() + ": " + ex));
+			return;
 		}
+		ApplyChunk(cc, array);
+		pendingFull.Add(cc);
 	}
 
 	public static void Tick()
@@ -604,7 +503,6 @@ public static class ChunkStreamer
 				queue.RemoveAt(0);
 			}
 		}
-		ApplyDoneChunks(4);
 		int num3 = 0;
 		if (pc != lastScanChunk)
 		{
@@ -731,7 +629,6 @@ public static class ChunkStreamer
 
 	private static void GenChunk(Vector2Int c, bool full)
 	{
-		//IL_00a3: Unknown result type (might be due to invalid IL or missing references)
 		if (genData[c.x, c.y] || genApplied[c.x, c.y])
 		{
 			return;
@@ -739,11 +636,17 @@ public static class ChunkStreamer
 		genData[c.x, c.y] = true;
 		genFull[c.x, c.y] = full;
 		inQueue[c.x, c.y] = false;
-		EnsureTerrainThread();
-		lock (terrLock)
+		ushort[,] array = new ushort[CS, CS];
+		try
 		{
-			terrJobs.Enqueue(c);
+			GenChunkTerrainInto(c, array);
 		}
+		catch (Exception ex)
+		{
+			Plugin.Log.LogWarning((object)("chunk gen failed " + c.ToString() + ": " + ex));
+			return;
+		}
+		ApplyChunk(c, array);
 	}
 
 	private static void ApplyChunk(Vector2Int c, ushort[,] data)
@@ -803,26 +706,6 @@ public static class ChunkStreamer
 			ManualLogSource log = Plugin.Log;
 			Vector2Int val = c;
 			log.LogWarning((object)("chunk apply failed " + val.ToString() + ": " + ex));
-		}
-	}
-
-	private static void ApplyDoneChunks(int max)
-	{
-		//IL_0060: Unknown result type (might be due to invalid IL or missing references)
-		for (int i = 0; i < max; i++)
-		{
-			bool flag;
-			KeyValuePair<Vector2Int, ushort[,]> keyValuePair;
-			lock (terrLock)
-			{
-				flag = terrDone.Count > 0;
-				keyValuePair = ((!flag) ? default(KeyValuePair<Vector2Int, ushort[,]>) : terrDone.Dequeue());
-			}
-			if (!flag)
-			{
-				break;
-			}
-			ApplyChunk(keyValuePair.Key, keyValuePair.Value);
 		}
 	}
 
