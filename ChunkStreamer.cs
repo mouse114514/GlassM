@@ -1,148 +1,227 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Reflection;
+using System.Threading;
+using BepInEx.Logging;
 using UnityEngine;
+using UnityEngine.Events;
 using UnityEngine.Tilemaps;
+using Random = UnityEngine.Random;
+using Object = UnityEngine.Object;
+using NoiseType = FastNoiseLite.NoiseType;
+using FractalType = FastNoiseLite.FractalType;
+using CellularDistanceFunction = FastNoiseLite.CellularDistanceFunction;
+using CellularReturnType = FastNoiseLite.CellularReturnType;
+using RotationType3D = FastNoiseLite.RotationType3D;
+using DomainWarpType = FastNoiseLite.DomainWarpType;
 
 namespace GlassM;
 
-// =====================================================================
-// 分区块流式生成:保持原版分层与地形生成逻辑(噪声配置/判定公式完全
-// 照搬 WorldGenerateTerrain),仅把"全图一次性生成"改为按玩家位置
-// 增量生成区块;远离的区块卸载 TilemapCollider2D(数据保留,行为一致)。
-// =====================================================================
 public static class ChunkStreamer
 {
 	public static readonly int CS = WorldGeneration.CHUNKSIZE;
 
 	public static WorldGeneration W;
+
 	public static bool Active;
 
-	// private 字段反射(worldBlocks/chunks)
-	static readonly FieldInfo f_worldBlocks = typeof(WorldGeneration).GetField("worldBlocks", BindingFlags.Instance | BindingFlags.NonPublic);
-	static readonly FieldInfo f_chunks = typeof(WorldGeneration).GetField("chunks", BindingFlags.Instance | BindingFlags.NonPublic);
-	public static ushort[,] WB => (ushort[,])f_worldBlocks.GetValue(W);
-	public static Tilemap[,] CH => (Tilemap[,])f_chunks.GetValue(W);
+	private static readonly FieldInfo f_worldBlocks = typeof(WorldGeneration).GetField("worldBlocks", BindingFlags.Instance | BindingFlags.NonPublic);
 
-	// 地形噪声(按 biomeDepth 初始化,跨区块持续使用,保证与全量生成一致)
-	static FastNoiseLite caveNoise;
-	static FastNoiseLite dirtPerlin;
-	static FastNoiseLite frequencyMap;
-	static FastNoiseLite biomeMap;
-	static FastNoiseLite toxicNoise;
-	static FastNoiseLite biomeMap2;
-	static FastNoiseLite marbleMap;
-	static float minMarble;
-	static int biome;
+	private static readonly FieldInfo f_chunks = typeof(WorldGeneration).GetField("chunks", BindingFlags.Instance | BindingFlags.NonPublic);
 
-	// 区块状态
-	public static readonly bool[,] genData = new bool[16, 16]; // worldBlocks 数据已生成
-	static readonly bool[,] colliderOn = new bool[16, 16];     // collider 当前状态
-	static readonly bool[,] inQueue = new bool[16, 16];        // 该块是否已在生成队列(避免 List.Contains O(n))
-	static readonly bool[,] genFull = new bool[16, 16];        // 该块需完整生成(地形+矿石+液体+实体)
-	static readonly bool[,] genApplied = new bool[16, 16];     // 地形已后台算完并已应用
-	static readonly bool[,] dirtyRender = new bool[16, 16];    // 远处跳过的渲染,回到近处需补渲
-	static readonly List<Vector2Int> queue = new List<Vector2Int>();
-	static readonly List<Vector2Int> pendingFull = new List<Vector2Int>(); // 初始只生成地形的块,待补实体/矿物/液体
+	private static FastNoiseLite caveNoise;
 
-	// 渲染复用数组(RenderChunk 每帧多次调用,避免反复分配)
-	static readonly TileBase[] renderTiles = new TileBase[CS * CS];
+	private static FastNoiseLite dirtPerlin;
 
-	// 后台地形线程:噪声计算(~11ms/块)移出主线程。
-	// 后台线程独占 terrainRng 和全部地形噪声实例(FastNoiseLite);
-	// 主线程不碰它们,只从完成队列取回临时数组写回 WB + 渲染/结构/实体。
-	static readonly object terrLock = new object();
-	static readonly Queue<Vector2Int> terrJobs = new Queue<Vector2Int>();
-	static readonly Queue<KeyValuePair<Vector2Int, ushort[,]>> terrDone = new Queue<KeyValuePair<Vector2Int, ushort[,]>>();
-	static System.Threading.Thread terrThread;
-	static volatile bool terrStop;
-	static void EnsureTerrainThread()
-	{
-		if (terrThread != null) return;
-		terrStop = false; // 常驻后台线程,仅层切换时由 OnClear 清队列
-		terrThread = new System.Threading.Thread(TerrainWorkerLoop);
-		terrThread.IsBackground = true;
-		terrThread.Start();
-	}
-	static void TerrainWorkerLoop()
-	{
-		while (!terrStop)
-		{
-			Vector2Int c = default;
-			bool has;
-			lock (terrLock)
-			{
-				has = terrJobs.Count > 0;
-				if (has) c = terrJobs.Dequeue();
-			}
-			if (!has)
-			{
-				System.Threading.Thread.Sleep(1);
-				continue;
-			}
-			var data = new ushort[CS, CS];
-			try
-			{
-				GenChunkTerrainInto(c, data);
-			}
-			catch (Exception e)
-			{
-				Plugin.Log.LogWarning("terrain worker failed " + c + ": " + e);
-				lock (terrLock) terrDone.Enqueue(new KeyValuePair<Vector2Int, ushort[,]>(c, data));
-				continue;
-			}
-			lock (terrLock) terrDone.Enqueue(new KeyValuePair<Vector2Int, ushort[,]>(c, data));
-		}
-	}
+	private static FastNoiseLite frequencyMap;
 
-	// 结构资源缓存(Resources.Load 结果,避免每块重复加载)
-	static readonly Dictionary<string, GameObject> structRes = new Dictionary<string, GameObject>();
-	static GameObject GetStruct(string name)
-	{
-		if (!structRes.TryGetValue(name, out var go))
-		{
-			go = Resources.Load<GameObject>(name);
-			structRes[name] = go;
-		}
-		return go;
-	}
-	static GameObject GetStructObj(string name)
-	{
-		if (!structRes.TryGetValue(name, out var go))
-		{
-			go = (GameObject)Resources.Load(name);
-			structRes[name] = go;
-		}
-		return go;
-	}
+	private static FastNoiseLite biomeMap;
 
-	// 诊断:单块应用耗时统计(主线程 ApplyChunk)
-	static long diagApplyMs, diagRenderMs, diagStructMs, diagRefreshMs, diagOreMs;
-	static int diagApplyCount;
+	private static FastNoiseLite toxicNoise;
 
-	// 地形用独立随机源(原版用 UnityEngine.Random;为了后续可后台线程化,
-	// 先切换为 System.Random,观感不变)。种子固定保证每次进图一致。
-	static readonly System.Random terrainRng = new System.Random(12345);
-	// UnityEngine.Random.Range(0,1) -> System.Random 等价
-	static float R(float min, float max) => (float)(min + (max - min) * terrainRng.NextDouble());
-	static float RV() => (float)terrainRng.NextDouble();
-	static int RI(int min, int max) => terrainRng.Next(min, max);
+	private static FastNoiseLite biomeMap2;
 
-	// 调度参数
-	public const int GEN_RADIUS = 5;     // 生成半径(区块),11x11
-	public const int UNLOAD_RADIUS = 7;  // 卸载半径(区块),超出关闭 collider
-	public const int INIT_RADIUS = 1;    // 初始同步生成半径,3x3
-	public const int MAX_PER_FRAME = 4;  // 每帧后台生成区块数上限
+	private static FastNoiseLite marbleMap;
+
+	private static float minMarble;
+
+	private static int biome;
+
+	public static readonly bool[,] genData = new bool[16, 16];
+
+	private static readonly bool[,] colliderOn = new bool[16, 16];
+
+	private static readonly bool[,] inQueue = new bool[16, 16];
+
+	private static readonly bool[,] genFull = new bool[16, 16];
+
+	private static readonly bool[,] genApplied = new bool[16, 16];
+
+	private static readonly bool[,] dirtyRender = new bool[16, 16];
+
+	private static readonly List<Vector2Int> queue = new List<Vector2Int>();
+
+	private static readonly List<Vector2Int> pendingFull = new List<Vector2Int>();
+
+	private static readonly TileBase[] renderTiles = (TileBase[])(object)new TileBase[CS * CS];
+
+	private static readonly object terrLock = new object();
+
+	private static readonly Queue<Vector2Int> terrJobs = new Queue<Vector2Int>();
+
+	private static readonly Queue<KeyValuePair<Vector2Int, ushort[,]>> terrDone = new Queue<KeyValuePair<Vector2Int, ushort[,]>>();
+
+	private static Thread terrThread;
+
+	private static volatile bool terrStop;
+
+	private static readonly Dictionary<string, GameObject> structRes = new Dictionary<string, GameObject>();
+
+	private static long diagApplyMs;
+
+	private static long diagRenderMs;
+
+	private static long diagStructMs;
+
+	private static long diagRefreshMs;
+
+	private static long diagOreMs;
+
+	private static int diagApplyCount;
+
+	private static readonly System.Random terrainRng = new System.Random(12345);
+
+	public const int GEN_RADIUS = 5;
+
+	public const int UNLOAD_RADIUS = 7;
+
+	public const int INIT_RADIUS = 1;
+
+	public const int MAX_PER_FRAME = 4;
+
+	public const float PHYSICS_DT = 0.03f;
 
 	public static Vector2Int PlayerChunk = new Vector2Int(8, 8);
-	static Vector2Int lastScanChunk = new Vector2Int(int.MinValue, int.MinValue); // 上次卸载扫描的玩家块
-	static Vector2Int lastEnqueueChunk = new Vector2Int(int.MinValue, int.MinValue); // 上次入队扫描的玩家块
-	static Vector2Int lastPlayerChunk;  // 用于计算移动方向
-	static Vector2Int moveDir;          // 玩家移动方向(块坐标差分,单位化)
-	public static int QueueCount => queue.Count;
-	static float nextLogTime;
 
-	// ===== 状态管理 =====
+	private static Vector2Int lastScanChunk = new Vector2Int(int.MinValue, int.MinValue);
+
+	private static Vector2Int lastEnqueueChunk = new Vector2Int(int.MinValue, int.MinValue);
+
+	private static Vector2Int lastPlayerChunk;
+
+	private static Vector2Int moveDir;
+
+	private static float nextLogTime;
+
+	public static readonly bool StreamOn = true;
+
+	private static readonly string[] Crystals = new string[7] { "BloodCrystal", "SoothingCrystal", "ReliefCrystal", "TurbulentCrystal", "OxygenCrystal", "EmissiveCrystal", "DigestionCrystal" };
+
+	public static ushort[,] WB => (ushort[,])f_worldBlocks.GetValue(W);
+
+	public static Tilemap[,] CH => (Tilemap[,])f_chunks.GetValue(W);
+
+	public static int QueueCount => queue.Count;
+
+	private static void EnsureTerrainThread()
+	{
+		if (terrThread == null)
+		{
+			terrStop = false;
+			terrThread = new Thread(TerrainWorkerLoop);
+			terrThread.IsBackground = true;
+			terrThread.Start();
+		}
+	}
+
+	private static void TerrainWorkerLoop()
+	{
+		//IL_0009: Unknown result type (might be due to invalid IL or missing references)
+		//IL_003c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0041: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0079: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0091: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0092: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00d8: Unknown result type (might be due to invalid IL or missing references)
+		//IL_010f: Unknown result type (might be due to invalid IL or missing references)
+		while (!terrStop)
+		{
+			Vector2Int val = default(Vector2Int);
+			bool flag;
+			lock (terrLock)
+			{
+				flag = terrJobs.Count > 0;
+				if (flag)
+				{
+					val = terrJobs.Dequeue();
+				}
+			}
+			if (!flag)
+			{
+				Thread.Sleep(1);
+				continue;
+			}
+			ushort[,] array = new ushort[CS, CS];
+			try
+			{
+				GenChunkTerrainInto(val, array);
+			}
+			catch (Exception ex)
+			{
+				ManualLogSource log = Plugin.Log;
+				Vector2Int val2 = val;
+				log.LogWarning((object)("terrain worker failed " + val2.ToString() + ": " + ex));
+				lock (terrLock)
+				{
+					terrDone.Enqueue(new KeyValuePair<Vector2Int, ushort[,]>(val, array));
+				}
+				continue;
+			}
+			lock (terrLock)
+			{
+				terrDone.Enqueue(new KeyValuePair<Vector2Int, ushort[,]>(val, array));
+			}
+		}
+	}
+
+	private static GameObject GetStruct(string name)
+	{
+		if (!structRes.TryGetValue(name, out var value))
+		{
+			value = Resources.Load<GameObject>(name);
+			structRes[name] = value;
+		}
+		return value;
+	}
+
+	private static GameObject GetStructObj(string name)
+	{
+		//IL_001c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0022: Expected O, but got Unknown
+		if (!structRes.TryGetValue(name, out var value))
+		{
+			value = (GameObject)Resources.Load(name);
+			structRes[name] = value;
+		}
+		return value;
+	}
+
+	private static float R(float min, float max)
+	{
+		return (float)((double)min + (double)(max - min) * terrainRng.NextDouble());
+	}
+
+	private static float RV()
+	{
+		return (float)terrainRng.NextDouble();
+	}
+
+	private static int RI(int min, int max)
+	{
+		return terrainRng.Next(min, max);
+	}
+
 	public static void OnNewWorld(WorldGeneration w)
 	{
 		W = w;
@@ -166,7 +245,6 @@ public static class ChunkStreamer
 		Array.Clear(dirtyRender, 0, dirtyRender.Length);
 		queue.Clear();
 		pendingFull.Clear();
-		// 后台地形线程常驻(background,空闲时 sleep);仅清空队列,新世界继续复用
 		lock (terrLock)
 		{
 			terrJobs.Clear();
@@ -174,9 +252,11 @@ public static class ChunkStreamer
 		}
 	}
 
-	static bool InWorld(Vector2Int c) => c.x >= 0 && c.y >= 0 && c.x < 16 && c.y < 16;
+	private static bool InWorld(Vector2Int c)
+	{
+		return c.x >= 0 && c.y >= 0 && c.x < 16 && c.y < 16;
+	}
 
-	// ===== 地形噪声初始化(照搬原版 WorldGenerateTerrain) =====
 	public static void InitTerrain(WorldGeneration w)
 	{
 		W = w;
@@ -184,347 +264,517 @@ public static class ChunkStreamer
 		if (biome <= 1)
 		{
 			caveNoise = NewNoise();
-			caveNoise.SetNoiseType(FastNoiseLite.NoiseType.Cellular);
+			caveNoise.SetNoiseType((NoiseType)2);
 			caveNoise.SetFrequency(0.06f);
 			caveNoise.SetFractalOctaves(3);
-			caveNoise.SetFractalType(FastNoiseLite.FractalType.FBm);
+			caveNoise.SetFractalType((FractalType)1);
 			caveNoise.SetFractalLacunarity(1.5f);
 			dirtPerlin = NewNoise();
-			dirtPerlin.SetNoiseType(FastNoiseLite.NoiseType.Perlin);
-			dirtPerlin.SetFractalType(FastNoiseLite.FractalType.FBm);
+			dirtPerlin.SetNoiseType((NoiseType)3);
+			dirtPerlin.SetFractalType((FractalType)1);
 			dirtPerlin.SetFractalOctaves(7);
 			dirtPerlin.SetFrequency(0.035f);
 			frequencyMap = NewNoise();
-			frequencyMap.SetNoiseType(FastNoiseLite.NoiseType.Perlin);
+			frequencyMap.SetNoiseType((NoiseType)3);
 			frequencyMap.SetFrequency(0.00037f);
 			biomeMap = NewNoise();
-			biomeMap.SetNoiseType(FastNoiseLite.NoiseType.Cellular);
+			biomeMap.SetNoiseType((NoiseType)2);
 			biomeMap.SetFrequency(0.04f);
-			biomeMap.SetCellularDistanceFunction(FastNoiseLite.CellularDistanceFunction.EuclideanSq);
-			biomeMap.SetCellularReturnType(FastNoiseLite.CellularReturnType.Distance);
+			biomeMap.SetCellularDistanceFunction((CellularDistanceFunction)1);
+			biomeMap.SetCellularReturnType((CellularReturnType)1);
 			biomeMap.SetCellularJitter(1f);
-			biomeMap.SetFractalType(FastNoiseLite.FractalType.Ridged);
+			biomeMap.SetFractalType((FractalType)2);
 			biomeMap.SetFractalLacunarity(1.5f);
 		}
 		else if (biome == 2 || biome == 3)
 		{
 			biomeMap = NewNoise();
-			biomeMap.SetNoiseType(FastNoiseLite.NoiseType.Value);
+			biomeMap.SetNoiseType((NoiseType)5);
 			biomeMap.SetFrequency(0.086f);
-			biomeMap.SetFractalType(FastNoiseLite.FractalType.FBm);
-			biomeMap.SetFractalOctaves(biome == 2 ? 2 : 3);
+			biomeMap.SetFractalType((FractalType)1);
+			biomeMap.SetFractalOctaves((biome == 2) ? 2 : 3);
 			biomeMap.SetFractalGain(0.49f);
 			biomeMap.SetFractalWeightedStrength(2.34f);
-			biomeMap.SetDomainWarpType(FastNoiseLite.DomainWarpType.OpenSimplex2);
+			biomeMap.SetDomainWarpType((DomainWarpType)0);
 			biomeMap.SetDomainWarpAmp(22f);
 			frequencyMap = NewNoise();
 			frequencyMap.SetFrequency(0.006f);
 			dirtPerlin = NewNoise();
-			dirtPerlin.SetNoiseType(FastNoiseLite.NoiseType.Cellular);
+			dirtPerlin.SetNoiseType((NoiseType)2);
 			dirtPerlin.SetFrequency(0.02f);
-			dirtPerlin.SetFractalType(FastNoiseLite.FractalType.Ridged);
+			dirtPerlin.SetFractalType((FractalType)2);
 			dirtPerlin.SetFractalGain(0.65f);
 			caveNoise = NewNoise();
 			caveNoise.SetFrequency(0.005f);
-			caveNoise.SetFractalType(FastNoiseLite.FractalType.PingPong);
+			caveNoise.SetFractalType((FractalType)3);
 			caveNoise.SetFractalGain(0.35f);
-			caveNoise.SetDomainWarpType(FastNoiseLite.DomainWarpType.BasicGrid);
+			caveNoise.SetDomainWarpType((DomainWarpType)2);
 			caveNoise.SetDomainWarpAmp(40f);
 			toxicNoise = NewNoise();
 			toxicNoise.SetFrequency(0.012f);
-			toxicNoise.SetFractalType(FastNoiseLite.FractalType.PingPong);
+			toxicNoise.SetFractalType((FractalType)3);
 			toxicNoise.SetFractalGain(0.3f);
-			toxicNoise.SetDomainWarpType(FastNoiseLite.DomainWarpType.BasicGrid);
+			toxicNoise.SetDomainWarpType((DomainWarpType)2);
 			toxicNoise.SetDomainWarpAmp(50f);
 			biomeMap2 = NewNoise();
-			biomeMap2.SetNoiseType(FastNoiseLite.NoiseType.Cellular);
+			biomeMap2.SetNoiseType((NoiseType)2);
 			biomeMap2.SetFrequency(0.05f);
-			biomeMap2.SetCellularDistanceFunction(FastNoiseLite.CellularDistanceFunction.EuclideanSq);
-			biomeMap2.SetCellularReturnType(FastNoiseLite.CellularReturnType.Distance);
+			biomeMap2.SetCellularDistanceFunction((CellularDistanceFunction)1);
+			biomeMap2.SetCellularReturnType((CellularReturnType)1);
 			biomeMap2.SetCellularJitter(1f);
-			biomeMap2.SetFractalType(FastNoiseLite.FractalType.Ridged);
+			biomeMap2.SetFractalType((FractalType)2);
 			biomeMap2.SetFractalLacunarity(1.5f);
 			marbleMap = NewNoise();
-			marbleMap.SetFrequency(biome == 2 ? 0.007f : 0.035f);
-			marbleMap.SetNoiseType(FastNoiseLite.NoiseType.Perlin);
-			marbleMap.SetDomainWarpType(FastNoiseLite.DomainWarpType.OpenSimplex2);
+			marbleMap.SetFrequency((biome == 2) ? 0.007f : 0.035f);
+			marbleMap.SetNoiseType((NoiseType)3);
+			marbleMap.SetDomainWarpType((DomainWarpType)0);
 			marbleMap.SetDomainWarpAmp(100f);
-			minMarble = biome == 2 ? 0.45f : 1f;
+			minMarble = ((biome == 2) ? 0.45f : 1f);
 		}
 		else
 		{
 			marbleMap = NewNoise();
-			marbleMap.SetNoiseType(FastNoiseLite.NoiseType.Value);
-			marbleMap.SetFractalType(FastNoiseLite.FractalType.Ridged);
+			marbleMap.SetNoiseType((NoiseType)5);
+			marbleMap.SetFractalType((FractalType)2);
 			marbleMap.SetFractalOctaves(3);
 			marbleMap.SetFractalLacunarity(2.29f);
 			marbleMap.SetFractalGain(4f);
 			marbleMap.SetFractalWeightedStrength(1.2f);
-			marbleMap.SetDomainWarpType(FastNoiseLite.DomainWarpType.OpenSimplex2);
+			marbleMap.SetDomainWarpType((DomainWarpType)0);
 			marbleMap.SetDomainWarpAmp(41f);
 			biomeMap2 = NewNoise();
 			biomeMap2.SetFrequency(0.02f);
-			biomeMap2.SetDomainWarpType(FastNoiseLite.DomainWarpType.OpenSimplex2);
+			biomeMap2.SetDomainWarpType((DomainWarpType)0);
 			biomeMap2.SetDomainWarpAmp(25f);
 		}
 	}
 
-	static FastNoiseLite NewNoise() => new FastNoiseLite(UnityEngine.Random.Range(0, int.MaxValue));
+	private static FastNoiseLite NewNoise()
+	{
+		//IL_000b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0011: Expected O, but got Unknown
+		return new FastNoiseLite(Random.Range(0, int.MaxValue));
+	}
 
-	public static readonly bool StreamOn = true; // 调试:false 时只生成初始区块,不流式扩展
-
-		// ===== 初始生成:同步生成玩家周围区块 + 其余入队 =====
 	public static void GenerateInitial()
 	{
-		Vector2Int center = new Vector2Int((int)(W.width / 2 / CS), (int)(W.height / 2 / CS));
-		PlayerChunk = center;
-		EnqueueAround(center, INIT_RADIUS, true);
+		//IL_0032: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0033: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0038: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0050: Unknown result type (might be due to invalid IL or missing references)
+		Vector2Int val = default(Vector2Int);
+		val = new Vector2Int((int)((long)(W.width / 2u) / (long)CS), (int)((long)(W.height / 2u) / (long)CS));
+		PlayerChunk = val;
+		EnqueueAround(val, 1, genNow: true);
 		GenSpawnCavity();
 		if (StreamOn)
-			EnqueueAround(center, GEN_RADIUS, false);
+		{
+			EnqueueAround(val, 5, genNow: false);
+		}
 	}
 
-	// 出生腔:原版出生点 0~15 米(世界顶部 y≈505 附近),PlaceBody 从顶部
-	// 往下扫"上空下实"。分区块生成时顶部尚未生成会被当成空气,出生点
-	// 会掉到已生成区域的顶部。这里在顶部中心挖出腔体(仿原版出生区):
-	// 腔体 x∈[508,516] y∈[1012,1022] 空气,腔底 y=1011 实心,顶部开口。
-	static void GenSpawnCavity()
+	private static void GenSpawnCavity()
 	{
-		if (W == null || WB == null) return;
-		int cx0 = 508 / CS, cx1 = 516 / CS; // 块 7,8
-		int cy = 1011 / CS;                 // 块 15
-		for (int cx = cx0; cx <= cx1; cx++)
+		//IL_004f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0123: Unknown result type (might be due to invalid IL or missing references)
+		if ((Object)(object)W == (Object)null || WB == null)
 		{
-			SyncGenAndWait(new Vector2Int(cx, cy));
+			return;
 		}
-		for (int x = 508; x <= 516; x++)
+		int num = 508 / CS;
+		int num2 = 516 / CS;
+		int num3 = 1011 / CS;
+		for (int i = num; i <= num2; i++)
 		{
-			for (int y = 1012; y <= 1022; y++)
-				WB[x, y] = 0;
-			WB[x, 1011] = 1;
-			WB[x, 1023] = 0;
+			SyncGenAndWait(new Vector2Int(i, num3));
 		}
-		for (int x = 506; x <= 518; x++)
+		for (int j = 508; j <= 516; j++)
 		{
-			WB[x, 1023] = 0;
-		}
-		for (int cx = cx0; cx <= cx1; cx++)
-			RenderChunk(new Vector2Int(cx, cy));
-		Plugin.Log.LogInfo("CS: spawn cavity done, cols=" + cx0 + "-" + cx1 + " row=" + cy);
-	}
-
-	static void EnqueueAround(Vector2Int c, int radius, bool genNow)
-	{
-		for (int x = c.x - radius; x <= c.x + radius; x++)
-		{
-			for (int y = c.y - radius; y <= c.y + radius; y++)
+			for (int k = 1012; k <= 1022; k++)
 			{
-				Vector2Int cc = new Vector2Int(x, y);
-				if (!InWorld(cc) || genData[cc.x, cc.y]) continue;
+				WB[j, k] = 0;
+			}
+			WB[j, 1011] = 1;
+			WB[j, 1023] = 0;
+		}
+		for (int l = 506; l <= 518; l++)
+		{
+			WB[l, 1023] = 0;
+		}
+		for (int m = num; m <= num2; m++)
+		{
+			RenderChunk(new Vector2Int(m, num3));
+		}
+		Plugin.Log.LogInfo((object)("CS: spawn cavity done, cols=" + num + "-" + num2 + " row=" + num3));
+	}
+
+	private static void EnqueueAround(Vector2Int c, int radius, bool genNow)
+	{
+		//IL_002a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_007c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_008c: Unknown result type (might be due to invalid IL or missing references)
+		Vector2Int val = default(Vector2Int);
+		for (int i = c.x - radius; i <= c.x + radius; i++)
+		{
+			for (int j = c.y - radius; j <= c.y + radius; j++)
+			{
+				val = new Vector2Int(i, j);
+				if (!InWorld(val) || genData[val.x, val.y])
+				{
+					continue;
+				}
 				if (genNow)
 				{
-					// 出生时同步生成(提交后台+等待),保证出生点就绪
-					if (!genApplied[cc.x, cc.y]) SyncGenAndWait(cc);
+					if (!genApplied[val.x, val.y])
+					{
+						SyncGenAndWait(val);
+					}
 				}
-				else { queue.Add(cc); inQueue[cc.x, cc.y] = true; }
+				else
+				{
+					queue.Add(val);
+					inQueue[val.x, val.y] = true;
+				}
 			}
 		}
 	}
 
-	// 同步:提交一块地形到后台并阻塞等待它算完应用(出生流程专用)
-	static void SyncGenAndWait(Vector2Int cc)
+	private static void SyncGenAndWait(Vector2Int cc)
 	{
-		if (genData[cc.x, cc.y] || genApplied[cc.x, cc.y]) return;
+		//IL_008d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0106: Unknown result type (might be due to invalid IL or missing references)
+		//IL_010b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0118: Unknown result type (might be due to invalid IL or missing references)
+		//IL_012b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0136: Unknown result type (might be due to invalid IL or missing references)
+		//IL_014f: Unknown result type (might be due to invalid IL or missing references)
+		if (genData[cc.x, cc.y] || genApplied[cc.x, cc.y])
+		{
+			return;
+		}
 		genData[cc.x, cc.y] = true;
 		genFull[cc.x, cc.y] = false;
 		EnsureTerrainThread();
-			lock (terrLock) terrJobs.Enqueue(cc);
-		for (int w = 0; w < 200; w++)
+		lock (terrLock)
 		{
-			KeyValuePair<Vector2Int, ushort[,]> item;
-			bool has;
+			terrJobs.Enqueue(cc);
+		}
+		for (int i = 0; i < 200; i++)
+		{
+			bool flag;
+			KeyValuePair<Vector2Int, ushort[,]> keyValuePair;
 			lock (terrLock)
 			{
-				has = terrDone.Count > 0;
-				if (has) item = terrDone.Dequeue();
-				else item = default;
+				flag = terrDone.Count > 0;
+				keyValuePair = ((!flag) ? default(KeyValuePair<Vector2Int, ushort[,]>) : terrDone.Dequeue());
 			}
-			if (has)
+			if (flag)
 			{
-				if (item.Key == cc)
+				if (keyValuePair.Key == cc)
 				{
-					ApplyChunk(cc, item.Value);
+					ApplyChunk(cc, keyValuePair.Value);
 					pendingFull.Add(cc);
-					return;
+					break;
 				}
-				// 不是目标块,先应用(也是我们的块)
-				ApplyChunk(item.Key, item.Value);
-				pendingFull.Add(item.Key);
+				ApplyChunk(keyValuePair.Key, keyValuePair.Value);
+				pendingFull.Add(keyValuePair.Key);
 			}
 			else
 			{
-				System.Threading.Thread.Sleep(1);
+				Thread.Sleep(1);
 			}
 		}
 	}
 
-	// ===== 每帧调度 =====
 	public static void Tick()
 	{
-		if (!Active || W == null || WB == null || CH == null) return;
+		//IL_0057: Unknown result type (might be due to invalid IL or missing references)
+		//IL_005c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_008e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00a4: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00a9: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00ac: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00c8: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00e4: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00e9: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00ef: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00f4: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0106: Unknown result type (might be due to invalid IL or missing references)
+		//IL_010b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0110: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0115: Unknown result type (might be due to invalid IL or missing references)
+		//IL_014d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0152: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0158: Unknown result type (might be due to invalid IL or missing references)
+		//IL_015d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0164: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0169: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0180: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0185: Unknown result type (might be due to invalid IL or missing references)
+		//IL_019d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01a2: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0223: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02be: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02c3: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02d2: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02da: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02e2: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02fa: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02fc: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0393: Unknown result type (might be due to invalid IL or missing references)
+		//IL_03c9: Unknown result type (might be due to invalid IL or missing references)
+		//IL_03ce: Unknown result type (might be due to invalid IL or missing references)
+		//IL_03e3: Unknown result type (might be due to invalid IL or missing references)
+		//IL_03e8: Unknown result type (might be due to invalid IL or missing references)
+		//IL_041f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0425: Unknown result type (might be due to invalid IL or missing references)
+		//IL_04ff: Unknown result type (might be due to invalid IL or missing references)
+		if (!Active || (Object)(object)W == (Object)null || WB == null || CH == null)
+		{
+			return;
+		}
+		if (Time.fixedDeltaTime != 0.03f)
+		{
+			Time.fixedDeltaTime = 0.03f;
+		}
 		Vector2Int pc = PlayerChunk;
 		try
 		{
-			Vector3 pos = WorldGeneration.world != null && PlayerCamera.main != null && PlayerCamera.main.body != null
-				? PlayerCamera.main.body.transform.position : Vector3.zero;
-			pc = new Vector2Int(Mathf.Clamp((int)(pos.x + 512f) / CS, 0, 15), Mathf.Clamp((int)(pos.y + 512f) / CS, 0, 15));
+			Vector3 val = (((Object)(object)WorldGeneration.world != (Object)null && (Object)(object)PlayerCamera.main != (Object)null && (Object)(object)PlayerCamera.main.body != (Object)null) ? ((Component)PlayerCamera.main.body).transform.position : Vector3.zero);
+			pc = new Vector2Int(Mathf.Clamp((int)(val.x + 512f) / CS, 0, 15), Mathf.Clamp((int)(val.y + 512f) / CS, 0, 15));
 			if (pc != lastPlayerChunk)
 			{
-				Vector2Int d = pc - lastPlayerChunk;
-				moveDir = new Vector2Int(d.x > 0 ? 1 : (d.x < 0 ? -1 : 0), d.y > 0 ? 1 : (d.y < 0 ? -1 : 0));
+				Vector2Int val2 = pc - lastPlayerChunk;
+				moveDir = new Vector2Int((val2.x > 0) ? 1 : ((val2.x < 0) ? (-1) : 0), (val2.y > 0) ? 1 : ((val2.y < 0) ? (-1) : 0));
 				lastPlayerChunk = pc;
 			}
 			PlayerChunk = pc;
 		}
-		catch { }
-		// 新进入范围的区块入队(仅玩家块变化时扫描,静止时跳过)
-		bool added = false;
+		catch
+		{
+		}
+		bool flag = false;
 		if (StreamOn && pc != lastEnqueueChunk)
 		{
 			lastEnqueueChunk = pc;
-			for (int x = pc.x - GEN_RADIUS; x <= pc.x + GEN_RADIUS; x++)
+			for (int i = pc.x - 5; i <= pc.x + 5; i++)
 			{
-				for (int y = pc.y - GEN_RADIUS; y <= pc.y + GEN_RADIUS; y++)
+				for (int j = pc.y - 5; j <= pc.y + 5; j++)
 				{
-					if (x < 0 || y < 0 || x > 15 || y > 15) continue;
-					if (!genData[x, y] && !inQueue[x, y])
+					if (i >= 0 && j >= 0 && i <= 15 && j <= 15 && !genData[i, j] && !inQueue[i, j])
 					{
-						queue.Add(new Vector2Int(x, y));
-						inQueue[x, y] = true;
-						added = true;
+						queue.Add(new Vector2Int(i, j));
+						inQueue[i, j] = true;
+						flag = true;
 					}
 				}
 			}
 		}
-		// 补全初始块(实体/矿物/液体)
 		if (pendingFull.Count > 0)
 		{
-			int n = Mathf.Min(MAX_PER_FRAME, pendingFull.Count);
-			for (int i = 0; i < n; i++)
+			int num = Mathf.Min(4, pendingFull.Count);
+			for (int k = 0; k < num; k++)
 			{
-				Vector2Int c = pendingFull[0];
+				Vector2Int val3 = pendingFull[0];
 				pendingFull.RemoveAt(0);
 				try
 				{
-					GenChunkOres(c);
-					GenChunkLiquids(c);
-					GenChunkEntities(c);
+					GenChunkOres(val3);
+					GenChunkLiquids(val3);
+					GenChunkEntities(val3);
 				}
-				catch (Exception e)
+				catch (Exception ex)
 				{
-					Plugin.Log.LogWarning("chunk full gen failed " + c + ": " + e);
+					ManualLogSource log = Plugin.Log;
+					Vector2Int val4 = val3;
+					log.LogWarning((object)("chunk full gen failed " + val4.ToString() + ": " + ex));
 				}
 			}
 		}
-		// 生成最近的新块(提交到后台地形线程),朝移动方向优先
 		if (queue.Count > 0)
 		{
-			if (added) queue.Sort((a, b) => GenPriority(a, pc).CompareTo(GenPriority(b, pc)));
-			int n = Mathf.Min(MAX_PER_FRAME, queue.Count);
-			for (int i = 0; i < n; i++)
+			if (flag)
 			{
-				GenChunk(queue[0], true);
+				queue.Sort((Vector2Int a, Vector2Int b) => GenPriority(a, pc).CompareTo(GenPriority(b, pc)));
+			}
+			int num2 = Mathf.Min(4, queue.Count);
+			for (int l = 0; l < num2; l++)
+			{
+				GenChunk(queue[0], full: true);
 				queue.RemoveAt(0);
 			}
 		}
-		// 应用后台已完成的地形(写回 WB + 渲染 + 结构 + 实体)
-		ApplyDoneChunks(MAX_PER_FRAME);
-		// 卸载:超出卸载半径的区块关闭 collider;回到半径内恢复。
-		// 仅玩家块变化时才扫描(静止时距离关系不变,结果必相同)
-		int unloadCount = 0;
+		ApplyDoneChunks(4);
+		int num3 = 0;
 		if (pc != lastScanChunk)
 		{
 			lastScanChunk = pc;
-			for (int x = 0; x < 16; x++)
+			for (int m = 0; m < 16; m++)
 			{
-				for (int y = 0; y < 16; y++)
+				for (int n = 0; n < 16; n++)
 				{
-					if (!genData[x, y]) continue;
-					bool far = Dist2(new Vector2Int(x, y), pc) > UNLOAD_RADIUS * UNLOAD_RADIUS;
-					if (far == colliderOn[x, y])
+					if (!genData[m, n])
 					{
-						Tilemap tm = CH[x, y];
-						if (tm == null) continue;
-						var col = tm.GetComponent<TilemapCollider2D>();
-						if (col == null) continue;
-						col.enabled = !far;
-						colliderOn[x, y] = !far;
-						unloadCount++;
-						// 回到范围内时,补渲之前远处跳过的块
-						if (!far && dirtyRender[x, y])
-							RenderChunk(new Vector2Int(x, y));
+						continue;
+					}
+					bool flag2 = Dist2(new Vector2Int(m, n), pc) > 49;
+					if (flag2 != colliderOn[m, n])
+					{
+						continue;
+					}
+					Tilemap val5 = CH[m, n];
+					if (!((Object)(object)val5 == (Object)null))
+					{
+						Collider2D[] components = ((Component)val5).GetComponents<Collider2D>();
+						foreach (Collider2D val6 in components)
+						{
+							((Behaviour)val6).enabled = !flag2;
+						}
+						Rigidbody2D component = ((Component)val5).GetComponent<Rigidbody2D>();
+						if ((Object)(object)component != (Object)null)
+						{
+							component.simulated = !flag2;
+						}
+						colliderOn[m, n] = !flag2;
+						num3++;
+						if (!flag2 && dirtyRender[m, n])
+						{
+							RenderChunk(new Vector2Int(m, n));
+						}
 					}
 				}
 			}
 		}
-		if (Time.unscaledTime > nextLogTime)
+		if (!(Time.unscaledTime > nextLogTime))
 		{
-			nextLogTime = Time.unscaledTime + 5f;
-			int genCount = 0;
-			for (int x = 0; x < 16; x++) for (int y = 0; y < 16; y++) if (genData[x, y]) genCount++;
-			string diag = "";
-			if (diagApplyCount > 0)
-			{
-				diag = string.Format(" | apply {0:N2}ms (ore {1:N2} render {2:N2} struct {3:N2} refresh {4:N2}, {5})",
-					diagApplyMs / (float)diagApplyCount, diagOreMs / (float)diagApplyCount, diagRenderMs / (float)diagApplyCount, diagStructMs / (float)diagApplyCount, diagRefreshMs / (float)diagApplyCount, diagApplyCount);
-				diagApplyMs = diagOreMs = diagRenderMs = diagStructMs = diagRefreshMs = 0; diagApplyCount = 0;
-			}
-			Plugin.Log.LogInfo("CS: generated " + genCount + "/256, queue " + queue.Count + ", collider toggles " + unloadCount + diag);
+			return;
 		}
+		nextLogTime = Time.unscaledTime + 5f;
+		int num5 = 0;
+		for (int num6 = 0; num6 < 16; num6++)
+		{
+			for (int num7 = 0; num7 < 16; num7++)
+			{
+				if (genData[num6, num7])
+				{
+					num5++;
+				}
+			}
+		}
+		string text = "";
+		if (diagApplyCount > 0)
+		{
+			text = $" | apply {(float)diagApplyMs / (float)diagApplyCount:N2}ms (ore {(float)diagOreMs / (float)diagApplyCount:N2} render {(float)diagRenderMs / (float)diagApplyCount:N2} struct {(float)diagStructMs / (float)diagApplyCount:N2} refresh {(float)diagRefreshMs / (float)diagApplyCount:N2}, {diagApplyCount})";
+			diagApplyMs = (diagOreMs = (diagRenderMs = (diagStructMs = (diagRefreshMs = 0L))));
+			diagApplyCount = 0;
+		}
+		int num8 = 0;
+		int num9 = 0;
+		int num10 = 0;
+		if (CH != null)
+		{
+			for (int num11 = 0; num11 < 16; num11++)
+			{
+				for (int num12 = 0; num12 < 16; num12++)
+				{
+					Tilemap val7 = CH[num11, num12];
+					if ((Object)(object)val7 == (Object)null)
+					{
+						continue;
+					}
+					TilemapRenderer component2 = ((Component)val7).GetComponent<TilemapRenderer>();
+					if ((Object)(object)component2 != (Object)null && ((Renderer)component2).enabled)
+					{
+						num8++;
+					}
+					Collider2D[] components2 = ((Component)val7).GetComponents<Collider2D>();
+					foreach (Collider2D val8 in components2)
+					{
+						if (((Behaviour)val8).enabled)
+						{
+							num9++;
+						}
+					}
+					Rigidbody2D component3 = ((Component)val7).GetComponent<Rigidbody2D>();
+					if ((Object)(object)component3 != (Object)null && component3.simulated)
+					{
+						num10++;
+					}
+				}
+			}
+		}
+		Plugin.Log.LogInfo((object)("CS: generated " + num5 + "/256, queue " + queue.Count + ", collider toggles " + num3 + " | rendererOn=" + num8 + " colliders=" + num9 + " rbSim=" + num10 + text));
 	}
 
-	static int Dist2(Vector2Int a, Vector2Int b)
+	private static int Dist2(Vector2Int a, Vector2Int b)
 	{
-		int dx = a.x - b.x, dy = a.y - b.y;
-		return dx * dx + dy * dy;
+		int num = a.x - b.x;
+		int num2 = a.y - b.y;
+		return num * num + num2 * num2;
 	}
 
-	// 生成优先级:欧氏距离 + 移动方向奖励(前方块优先)。
-	// 沿移动方向的块减权 16(约 4 格距离),减少"跑到新块才等生成"
-	static int GenPriority(Vector2Int a, Vector2Int b)
+	private static int GenPriority(Vector2Int a, Vector2Int b)
 	{
-		int dx = a.x - b.x, dy = a.y - b.y;
-		int d = dx * dx + dy * dy;
-		if (moveDir.x != 0 && dx != 0 && (dx > 0) == (moveDir.x > 0)) d -= 16;
-		if (moveDir.y != 0 && dy != 0 && (dy > 0) == (moveDir.y > 0)) d -= 16;
-		return d;
+		int num = a.x - b.x;
+		int num2 = a.y - b.y;
+		int num3 = num * num + num2 * num2;
+		if (moveDir.x != 0 && num != 0 && num > 0 == moveDir.x > 0)
+		{
+			num3 -= 16;
+		}
+		if (moveDir.y != 0 && num2 != 0 && num2 > 0 == moveDir.y > 0)
+		{
+			num3 -= 16;
+		}
+		return num3;
 	}
 
-	// ===== 区块生成:地形后台算 + 主线程应用 =====
-	// 提交地形到后台线程(异步),返回后主线程在 Tick 里 ApplyChunk 应用
-	static void GenChunk(Vector2Int c, bool full)
+	private static void GenChunk(Vector2Int c, bool full)
 	{
-		if (genData[c.x, c.y] || genApplied[c.x, c.y]) return;
+		//IL_00a3: Unknown result type (might be due to invalid IL or missing references)
+		if (genData[c.x, c.y] || genApplied[c.x, c.y])
+		{
+			return;
+		}
 		genData[c.x, c.y] = true;
 		genFull[c.x, c.y] = full;
 		inQueue[c.x, c.y] = false;
 		EnsureTerrainThread();
-		lock (terrLock) terrJobs.Enqueue(c);
+		lock (terrLock)
+		{
+			terrJobs.Enqueue(c);
+		}
 	}
 
-	// 主线程应用已完成地形:写回 WB + 矿石/液体/实体 + 渲染 + 结构
-	static void ApplyChunk(Vector2Int c, ushort[,] data)
+	private static void ApplyChunk(Vector2Int c, ushort[,] data)
 	{
-		if (genApplied[c.x, c.y]) return;
+		//IL_00d4: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00db: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00e2: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00f2: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0113: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0133: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0153: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0199: Unknown result type (might be due to invalid IL or missing references)
+		//IL_019a: Unknown result type (might be due to invalid IL or missing references)
+		if (genApplied[c.x, c.y])
+		{
+			return;
+		}
 		genApplied[c.x, c.y] = true;
-		var sw = System.Diagnostics.Stopwatch.StartNew();
+		Stopwatch stopwatch = Stopwatch.StartNew();
 		try
 		{
-			int bx = c.x * CS, by = c.y * CS;
+			int num = c.x * CS;
+			int num2 = c.y * CS;
 			for (int i = 0; i < CS; i++)
+			{
 				for (int j = 0; j < CS; j++)
-					WB[bx + i, by + j] = data[i, j];
-			var swO = System.Diagnostics.Stopwatch.StartNew();
+				{
+					WB[num + i, num2 + j] = data[i, j];
+				}
+			}
+			Stopwatch stopwatch2 = Stopwatch.StartNew();
 			if (genFull[c.x, c.y])
 			{
 				GenChunkOres(c);
@@ -535,142 +785,192 @@ public static class ChunkStreamer
 			{
 				pendingFull.Add(c);
 			}
-			diagOreMs += swO.ElapsedMilliseconds;
-			var swR = System.Diagnostics.Stopwatch.StartNew();
+			diagOreMs += stopwatch2.ElapsedMilliseconds;
+			Stopwatch stopwatch3 = Stopwatch.StartNew();
 			RenderChunk(c);
-			diagRenderMs += swR.ElapsedMilliseconds;
-			var swS = System.Diagnostics.Stopwatch.StartNew();
+			diagRenderMs += stopwatch3.ElapsedMilliseconds;
+			Stopwatch stopwatch4 = Stopwatch.StartNew();
 			GenChunkStructures(c);
-			diagStructMs += swS.ElapsedMilliseconds;
-			var swF = System.Diagnostics.Stopwatch.StartNew();
+			diagStructMs += stopwatch4.ElapsedMilliseconds;
+			Stopwatch stopwatch5 = Stopwatch.StartNew();
 			RefreshAround(c);
-			diagRefreshMs += swF.ElapsedMilliseconds;
-			diagApplyMs += sw.ElapsedMilliseconds;
+			diagRefreshMs += stopwatch5.ElapsedMilliseconds;
+			diagApplyMs += stopwatch.ElapsedMilliseconds;
 			diagApplyCount++;
 		}
-		catch (Exception e)
+		catch (Exception ex)
 		{
-			Plugin.Log.LogWarning("chunk apply failed " + c + ": " + e);
+			ManualLogSource log = Plugin.Log;
+			Vector2Int val = c;
+			log.LogWarning((object)("chunk apply failed " + val.ToString() + ": " + ex));
 		}
 	}
 
-	// 从后台完成队列取回已算好的地形并应用
-	static void ApplyDoneChunks(int max)
+	private static void ApplyDoneChunks(int max)
 	{
-		int n = 0;
-		while (n < max)
+		//IL_0060: Unknown result type (might be due to invalid IL or missing references)
+		for (int i = 0; i < max; i++)
 		{
-			KeyValuePair<Vector2Int, ushort[,]> item;
-			bool has;
+			bool flag;
+			KeyValuePair<Vector2Int, ushort[,]> keyValuePair;
 			lock (terrLock)
 			{
-				has = terrDone.Count > 0;
-				if (has) item = terrDone.Dequeue();
-				else item = default;
+				flag = terrDone.Count > 0;
+				keyValuePair = ((!flag) ? default(KeyValuePair<Vector2Int, ushort[,]>) : terrDone.Dequeue());
 			}
-			if (!has) break;
-			ApplyChunk(item.Key, item.Value);
-			n++;
+			if (!flag)
+			{
+				break;
+			}
+			ApplyChunk(keyValuePair.Key, keyValuePair.Value);
 		}
 	}
 
-static void RenderChunk(Vector2Int c)
+	private static void RenderChunk(Vector2Int c)
 	{
-		Tilemap tm = CH[c.x, c.y];
-		if (tm == null) return;
-		int bx = c.x * CS, by = c.y * CS;
-		int half = W.HALFCHUNKSIZE;
-		// 远处区块(卸载半径外)跳过 Mesh 重建:数据在 WB,回到近处时补渲。
-		if (Dist2(c, PlayerChunk) > UNLOAD_RADIUS * UNLOAD_RADIUS)
+		//IL_0053: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0054: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00fb: Unknown result type (might be due to invalid IL or missing references)
+		Tilemap val = CH[c.x, c.y];
+		if ((Object)(object)val == (Object)null)
+		{
+			return;
+		}
+		int num = c.x * CS;
+		int num2 = c.y * CS;
+		int hALFCHUNKSIZE = W.HALFCHUNKSIZE;
+		if (Dist2(c, PlayerChunk) > 49)
 		{
 			dirtyRender[c.x, c.y] = true;
 			return;
 		}
-		// 按 row-major 填充(SetTilesBlock 比 SetTiles 快:直接写网格,
-		// 跳过 Unity 的 tile 缓存字典查找;要求数组覆盖整块、从 origin 起)
-		int idx = 0;
-		for (int j = 0; j < CS; j++)
+		int num3 = 0;
+		for (int i = 0; i < CS; i++)
 		{
-			for (int i = 0; i < CS; i++)
-				renderTiles[idx++] = W.tiles[WB[bx + i, by + j]];
+			for (int j = 0; j < CS; j++)
+			{
+				renderTiles[num3++] = W.tiles[WB[num + j, num2 + i]];
+			}
 		}
-		tm.SetTilesBlock(new BoundsInt(-half, -half, 0, CS, CS, 1), renderTiles);
+		val.SetTilesBlock(new BoundsInt(-hALFCHUNKSIZE, -hALFCHUNKSIZE, 0, CS, CS, 1), renderTiles);
 		dirtyRender[c.x, c.y] = false;
 	}
 
-	// ===== 结构生成(照搬原版 WorldGenerateStructures/GenerateDropCapsules/
-	// GenerateCollapsedPods/GenerateLifePods,按区块归属) =====
-	// 原版:全图循环次数 = chunkWidth*chunkHeight*amt*rarity = 256*amt*rarity
-	// 每块期望 λ = amt*rarity;用 while(Random.value<λ) 掷次数(几何分布,期望=λ)
-	static int Poisson(float lambda)
+	private static int Poisson(float lambda)
 	{
-		int k = 0;
-		while (UnityEngine.Random.value < lambda) k++;
-		return k;
+		int num = 0;
+		while (Random.value < lambda)
+		{
+			num++;
+		}
+		return num;
 	}
 
-	// 从世界坐标 pos 向下扫找第一个实心格(替代原版 Physics2D.Raycast,
-	// 因为分块生成时 collider 未更新)。原版 raycast 命中点落在实心格表面,
-	// WorldToBlockPos 取整后即实心格本身(结构"嵌"在石头里,与观感一致)
-	static bool GroundAbove(Vector2 pos, out Vector2Int ground, float maxDist = 400f)
+	private static bool GroundAbove(Vector2 pos, out Vector2Int ground, float maxDist = 400f)
 	{
-		Vector2Int p = W.WorldToBlockPos(pos);
-		for (int y = p.y; y >= 0 && p.y - y < maxDist; y--)
+		//IL_0006: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0007: Unknown result type (might be due to invalid IL or missing references)
+		//IL_000c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_003b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0040: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0069: Unknown result type (might be due to invalid IL or missing references)
+		//IL_006a: Unknown result type (might be due to invalid IL or missing references)
+		Vector2Int val = W.WorldToBlockPos(pos);
+		int num = val.y;
+		while (num >= 0 && (float)(val.y - num) < maxDist)
 		{
-			if (WB[p.x, y] > 0)
+			if (WB[val.x, num] > 0)
 			{
-				ground = new Vector2Int(p.x, y);
+				ground = new Vector2Int(val.x, num);
 				return true;
 			}
+			num--;
 		}
-		ground = p;
+		ground = val;
 		return false;
 	}
 
-	// 块内随机世界坐标,偏向块中心(原版为全图随机;限制在中心 ±22 格内使
-	// 半径 ≤20 的结构不跨块边界,避免分块生成时结构边缘被邻块地形覆盖)
-	static Vector2 RandPosInChunk(Vector2Int c)
+	private static Vector2 RandPosInChunk(Vector2Int c)
 	{
-		return new Vector2(c.x * CS - W.halfWidth + UnityEngine.Random.Range(10, CS - 10),
-			c.y * CS - W.halfHeight + UnityEngine.Random.Range(10, CS - 10));
+		//IL_0059: Unknown result type (might be due to invalid IL or missing references)
+		//IL_005e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0061: Unknown result type (might be due to invalid IL or missing references)
+		return new Vector2((float)(c.x * CS - W.halfWidth + Random.Range(10, CS - 10)), (float)(c.y * CS - W.halfHeight + Random.Range(10, CS - 10)));
 	}
 
-	// 结构写入后刷新本块+已生成邻块(结构只写 worldBlocks,靠刷新显示)
-	// 结构写入后重渲染本块(结构只写 worldBlocks,靠刷新显示)。
-	// 注意:原版是全图 UpdateWorld 一次刷新;我们分块后,结构位置经
-	// RandPosInChunk 限制在块中心 ±22 内,基本不跨块边界,故只重渲染本块
-	// 即可(邻块几乎不被结构改到,省去 8/9 的整块 Mesh 重建)。
-	// 若结构确实跨边界(极少数),其边缘会在邻块自身 apply 时被刷新覆盖。
-	static void RefreshAround(Vector2Int c)
+	private static void RefreshAround(Vector2Int c)
 	{
+		//IL_001d: Unknown result type (might be due to invalid IL or missing references)
 		if (genData[c.x, c.y])
+		{
 			RenderChunk(c);
+		}
 	}
 
-	// 照搬原版 WorldGenerateStructures(按 biomeDepth 分层;原版结构密度与块无关)
-	static void GenChunkStructures(Vector2Int c)
+	private static void GenChunkStructures(Vector2Int c)
 	{
-		if (W.biomeOverride != WorldGeneration.OverrideSceneType.None) return;
-		int d = W.biomeDepth;
-		if (d > 4) return;
+		//IL_0006: Unknown result type (might be due to invalid IL or missing references)
+		//IL_000c: Invalid comparison between Unknown and I4
+		//IL_0057: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00ec: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0121: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0137: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0154: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0170: Unknown result type (might be due to invalid IL or missing references)
+		//IL_018c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01a8: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01c4: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01fb: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0211: Unknown result type (might be due to invalid IL or missing references)
+		//IL_022d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0249: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0265: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0281: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02c0: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02c1: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02dd: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02f8: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0314: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0330: Unknown result type (might be due to invalid IL or missing references)
+		//IL_034c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0368: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0384: Unknown result type (might be due to invalid IL or missing references)
+		//IL_039a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_03a2: Unknown result type (might be due to invalid IL or missing references)
+		//IL_03c6: Unknown result type (might be due to invalid IL or missing references)
+		//IL_03ef: Unknown result type (might be due to invalid IL or missing references)
+		//IL_03f0: Unknown result type (might be due to invalid IL or missing references)
+		if ((int)W.biomeOverride > 0)
+		{
+			return;
+		}
+		int biomeDepth = W.biomeDepth;
+		if (biomeDepth > 4)
+		{
+			return;
+		}
 		try
 		{
-			float lrm = W.totalLootRarity;
-			int n;
-			// case1:空投舱+塌陷舱(所有层,密度按层,无 rarity 乘数)
-			n = Poisson(UnityEngine.Random.Range(0.12f, 0.13f));
-			for (int i = 0; i < n; i++) DropCapsuleAt(c);
-			float cap;
-			if (d == 2) cap = UnityEngine.Random.Range(0.066f, 0.077f);
-			else if (d == 3) cap = UnityEngine.Random.Range(0.066f, 0.077f) * 2.5f;
-			else if (d == 4) cap = UnityEngine.Random.Range(0.066f, 0.077f);
-			else cap = UnityEngine.Random.Range(0.055f, 0.066f);
-			n = Poisson(cap);
-			for (int i = 0; i < n; i++) CollapsedPodAt(c);
-			if (d <= 1)
+			float totalLootRarity = W.totalLootRarity;
+			int num = Poisson(Random.Range(0.12f, 0.13f));
+			for (int i = 0; i < num; i++)
 			{
-				// case2:depth>0 才有 BioContainer/SteelBridge(SteelBridge 无 raycast,位置=随机点)
-				if (d > 0)
+				DropCapsuleAt(c);
+			}
+			num = Poisson(biomeDepth switch
+			{
+				2 => Random.Range(0.066f, 0.077f), 
+				3 => Random.Range(0.066f, 0.077f) * 2.5f, 
+				4 => Random.Range(0.066f, 0.077f), 
+				_ => Random.Range(0.055f, 0.066f), 
+			});
+			for (int j = 0; j < num; j++)
+			{
+				CollapsedPodAt(c);
+			}
+			if (biomeDepth <= 1)
+			{
+				if (biomeDepth > 0)
 				{
 					BioContainerAt(c, 0.05f, 0.07f, 1f);
 					BridgeAt(c, 0.09f, 0.12f, "Structures/SteelBridge", 0.85f, raycast: false);
@@ -681,9 +981,8 @@ static void RenderChunk(Vector2Int c)
 				PodAt(c, 0.03f, 0.05f, "Structures/WoodCross", 0.94f, entity: false);
 				PodAt(c, 0.03f, 0.05f, "Structures/WoodHorizontal", 0.94f, entity: false);
 			}
-			else if (d == 2 || d == 3)
+			else if (biomeDepth == 2 || biomeDepth == 3)
 			{
-				// case3
 				BioContainerAt(c, 0.05f, 0.07f, 1f);
 				PodAt(c, 0.04f, 0.05f, "Structures/MedicalBuilding", 0.98f);
 				BridgeAt(c, 0.09f, 0.12f, "Structures/SteelBridge", 0.95f, raycast: false);
@@ -693,13 +992,13 @@ static void RenderChunk(Vector2Int c)
 			}
 			else
 			{
-				// case4:大树(raycast 距离=CHUNKSIZE=64,无 rarity)
-				n = Poisson(UnityEngine.Random.Range(0.9f, 1.1f));
-				for (int i = 0; i < n; i++)
+				num = Poisson(Random.Range(0.9f, 1.1f));
+				for (int k = 0; k < num; k++)
 				{
-					Vector2Int p;
-					if (GroundAbove(RandPosInChunk(c), out p, 64f))
-						W.GenerateTree(p);
+					if (GroundAbove(RandPosInChunk(c), out var ground, 64f))
+					{
+						W.GenerateTree(ground);
+					}
 				}
 				PodAt(c, 0.06f, 0.08f, "Structures/CratePod", 0.82f);
 				PodAt(c, 0.06f, 0.08f, "Structures/MiniPod", 0.88f);
@@ -710,544 +1009,1068 @@ static void RenderChunk(Vector2Int c)
 				IronVein(c, 1);
 				IronVein(c, 2);
 			}
-			// 生命舱(所有层,无 rarity)
-			n = Poisson(UnityEngine.Random.Range(0.088f, 0.1f));
-			for (int i = 0; i < n; i++) LifePodAt(c);
+			num = Poisson(Random.Range(0.088f, 0.1f));
+			for (int l = 0; l < num; l++)
+			{
+				LifePodAt(c);
+			}
 		}
-		catch (Exception e)
+		catch (Exception ex)
 		{
-			Plugin.Log.LogWarning("chunk structures failed " + c + ": " + e);
+			ManualLogSource log = Plugin.Log;
+			Vector2Int val = c;
+			log.LogWarning((object)("chunk structures failed " + val.ToString() + ": " + ex));
 		}
 	}
 
-	static void DropCapsuleAt(Vector2Int c)
+	private static void DropCapsuleAt(Vector2Int c)
 	{
-		Vector2 pos = RandPosInChunk(c);
-		Vector2Int p;
-		if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
-		((GameObject)UnityEngine.Object.Instantiate(GetStructObj("dropcapsule"), pos,
-			Quaternion.Euler(0f, 0f, UnityEngine.Random.Range(0f, 360f)))).GetComponent<AudioSource>().pitch = UnityEngine.Random.Range(0.9f, 1.1f);
-		W.GenerateBlockCircle(pos, 32, 3, 0.7f, 0f);
-		W.GenerateBlockCircle(pos, 30, 6, 0.04f, 0.04f);
-		W.GenerateBlockCircle(pos, 4, 0, 1f, 0.9f);
+		//IL_0001: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0002: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0007: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0008: Unknown result type (might be due to invalid IL or missing references)
+		//IL_001e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_001f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0024: Unknown result type (might be due to invalid IL or missing references)
+		//IL_002f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0030: Unknown result type (might be due to invalid IL or missing references)
+		//IL_004e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0077: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0093: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00af: Unknown result type (might be due to invalid IL or missing references)
+		Vector2 val = RandPosInChunk(c);
+		if (GroundAbove(val, out var ground))
+		{
+			val = W.BlockToWorldPos(ground);
+		}
+		Object.Instantiate<GameObject>(GetStructObj("dropcapsule"), (Vector2)(val), Quaternion.Euler(0f, 0f, Random.Range(0f, 360f))).GetComponent<AudioSource>().pitch = Random.Range(0.9f, 1.1f);
+		W.GenerateBlockCircle(val, 32, (ushort)3, 0.7f, 0f, false, false, false);
+		W.GenerateBlockCircle(val, 30, (ushort)6, 0.04f, 0.04f, false, false, false);
+		W.GenerateBlockCircle(val, 4, (ushort)0, 1f, 0.9f, false, false, false);
 	}
 
-	static void CollapsedPodAt(Vector2Int c)
+	private static void CollapsedPodAt(Vector2Int c)
 	{
-		Vector2 pos = RandPosInChunk(c);
-		Vector2Int p;
-		if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
-		Vector2Int vp = W.WorldToBlockPos(pos);
-		CraterAt(pos, vp);
-		W.GenerateObjectAtPos(vp, GetStruct("LifepodCollapsed").transform.GetChild(0).GetComponent<Tilemap>(), 0.88f, true);
-		if (UnityEngine.Random.value < 0.9f)
+		//IL_0001: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0002: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0007: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0008: Unknown result type (might be due to invalid IL or missing references)
+		//IL_001e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_001f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0024: Unknown result type (might be due to invalid IL or missing references)
+		//IL_002a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_002b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0030: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0031: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0032: Unknown result type (might be due to invalid IL or missing references)
+		//IL_003e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_008c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_008d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00a7: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00ff: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0100: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0114: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0119: Unknown result type (might be due to invalid IL or missing references)
+		//IL_011e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0123: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0166: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0167: Unknown result type (might be due to invalid IL or missing references)
+		//IL_017b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0180: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0185: Unknown result type (might be due to invalid IL or missing references)
+		//IL_018a: Unknown result type (might be due to invalid IL or missing references)
+		Vector2 val = RandPosInChunk(c);
+		if (GroundAbove(val, out var ground))
 		{
-			AmmoScript component = ((GameObject)UnityEngine.Object.Instantiate(GetStructObj(Utils.PickRandom(W.spawnableMagazines)), pos,
-				Quaternion.Euler(0f, 0f, UnityEngine.Random.value * 360f))).GetComponent<AmmoScript>();
-			component.rounds = Mathf.RoundToInt(component.maxRounds * UnityEngine.Random.value);
+			val = W.BlockToWorldPos(ground);
 		}
-		for (int l = 0; l < 3; l++)
+		Vector2Int val2 = W.WorldToBlockPos(val);
+		CraterAt(val, val2);
+		W.GenerateObjectAtPos(val2, ((Component)GetStruct("LifepodCollapsed").transform.GetChild(0)).GetComponent<Tilemap>(), 0.88f, true);
+		if (Random.value < 0.9f)
 		{
-			if (UnityEngine.Random.Range(0f, 1f) < 0.3f)
-				UnityEngine.Object.Instantiate(GetStructObj("experimentflesh"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
+			AmmoScript component = Object.Instantiate<GameObject>(GetStructObj(Utils.PickRandom<string>(W.spawnableMagazines)), (Vector2)(val), Quaternion.Euler(0f, 0f, Random.value * 360f)).GetComponent<AmmoScript>();
+			component.rounds = Mathf.RoundToInt((float)component.maxRounds * Random.value);
 		}
-		if (UnityEngine.Random.Range(0f, 1f) < 0.8f)
-			UnityEngine.Object.Instantiate(GetStructObj("internalorgans"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
+		for (int i = 0; i < 3; i++)
+		{
+			if (Random.Range(0f, 1f) < 0.3f)
+			{
+				Object.Instantiate<GameObject>(GetStructObj("experimentflesh"), (Vector2)(val + Vector2.right * Random.Range(-3f, 3f)), Quaternion.identity);
+			}
+		}
+		if (Random.Range(0f, 1f) < 0.8f)
+		{
+			Object.Instantiate<GameObject>(GetStructObj("internalorgans"), (Vector2)(val + Vector2.right * Random.Range(-3f, 3f)), Quaternion.identity);
+		}
 	}
 
-	static void LifePodAt(Vector2Int c)
+	private static void LifePodAt(Vector2Int c)
 	{
-		Vector2 pos = RandPosInChunk(c);
-		Vector2Int p;
-		if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
-		Vector2Int vp = W.WorldToBlockPos(pos);
-		CraterAt(pos, vp);
-		W.GenerateObjectAtPos(vp, GetStruct("Lifepod").transform.GetChild(0).GetComponent<Tilemap>(), 0.95f, true);
-		W.GenerateEntityAtPos(W.BlockToWorldPos(vp), GetStruct("Lifepod"));
-		if (UnityEngine.Random.value < WorldGeneration.GetRunSettingFloat("traderchance") * 0.01f)
+		//IL_0001: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0002: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0007: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0008: Unknown result type (might be due to invalid IL or missing references)
+		//IL_001e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_001f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0024: Unknown result type (might be due to invalid IL or missing references)
+		//IL_002a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_002b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0030: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0031: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0032: Unknown result type (might be due to invalid IL or missing references)
+		//IL_003e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_006f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0070: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00d4: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00d5: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00db: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00e0: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00e5: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00ec: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00f1: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00f6: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00fb: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0105: Unknown result type (might be due to invalid IL or missing references)
+		//IL_010a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_010f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0114: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0149: Unknown result type (might be due to invalid IL or missing references)
+		//IL_014a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0150: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0155: Unknown result type (might be due to invalid IL or missing references)
+		//IL_015a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0169: Unknown result type (might be due to invalid IL or missing references)
+		//IL_016a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0170: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0175: Unknown result type (might be due to invalid IL or missing references)
+		//IL_017a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0184: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0189: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01a1: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01a2: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01a8: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01ad: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01b2: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01b7: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01c1: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01c6: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01cb: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01d0: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0208: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0209: Unknown result type (might be due to invalid IL or missing references)
+		//IL_021d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0222: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0227: Unknown result type (might be due to invalid IL or missing references)
+		//IL_022c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_026f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0270: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0284: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0289: Unknown result type (might be due to invalid IL or missing references)
+		//IL_028e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0293: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02c4: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02c5: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02d9: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02de: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02e3: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02f7: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02fc: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0301: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0306: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0332: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0333: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0347: Unknown result type (might be due to invalid IL or missing references)
+		//IL_034c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0378: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0379: Unknown result type (might be due to invalid IL or missing references)
+		//IL_038d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0392: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0397: Unknown result type (might be due to invalid IL or missing references)
+		//IL_039e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_03db: Unknown result type (might be due to invalid IL or missing references)
+		//IL_03fa: Unknown result type (might be due to invalid IL or missing references)
+		Vector2 val = RandPosInChunk(c);
+		if (GroundAbove(val, out var ground))
 		{
-			int num3 = UnityEngine.Random.Range(-4, 4);
-			TraderScript component = ((GameObject)UnityEngine.Object.Instantiate(GetStructObj("trader" + UnityEngine.Random.Range(1, 4)),
-				W.BlockToWorldPos(vp + Vector2Int.down * 7 + Vector2Int.right * num3) - Vector2.one * 0.5f, Quaternion.identity)).GetComponent<TraderScript>();
-			if (Mathf.Abs(num3) > 1.5f) component.farEnoughToMove = true;
-			component.MoveRange = new RangeF(W.BlockToWorldPos(vp - Vector2Int.right * 5).x, W.BlockToWorldPos(vp + Vector2Int.right * 5).x);
+			val = W.BlockToWorldPos(ground);
+		}
+		Vector2Int val2 = W.WorldToBlockPos(val);
+		CraterAt(val, val2);
+		W.GenerateObjectAtPos(val2, ((Component)GetStruct("Lifepod").transform.GetChild(0)).GetComponent<Tilemap>(), 0.95f, true);
+		W.GenerateEntityAtPos(W.BlockToWorldPos(val2), GetStruct("Lifepod"));
+		if (Random.value < WorldGeneration.GetRunSettingFloat("traderchance") * 0.01f)
+		{
+			int num = Random.Range(-4, 4);
+			TraderScript component = Object.Instantiate<GameObject>(GetStructObj("trader" + Random.Range(1, 4)), (Vector2)(W.BlockToWorldPos(val2 + Vector2Int.down * 7 + Vector2Int.right * num) - Vector2.one * 0.5f), Quaternion.identity).GetComponent<TraderScript>();
+			if ((float)Mathf.Abs(num) > 1.5f)
+			{
+				component.farEnoughToMove = true;
+			}
+			component.MoveRange = new RangeF(W.BlockToWorldPos(val2 - Vector2Int.right * 5).x, W.BlockToWorldPos(val2 + Vector2Int.right * 5).x);
 		}
 		else
 		{
-			UnityEngine.Object.Instantiate(GetStructObj("lifepodchest"), W.BlockToWorldPos(vp + Vector2Int.down * 6) - Vector2.one * 0.5f, Quaternion.identity);
+			Object.Instantiate<GameObject>(GetStructObj("lifepodchest"), (Vector2)(W.BlockToWorldPos(val2 + Vector2Int.down * 6) - Vector2.one * 0.5f), Quaternion.identity);
 		}
-		for (int l = 0; l < 3; l++)
+		for (int i = 0; i < 3; i++)
 		{
-			if (UnityEngine.Random.Range(0f, 1f) < 0.05f)
-				UnityEngine.Object.Instantiate(GetStructObj("experimentflesh"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
-		}
-		if (UnityEngine.Random.Range(0f, 1f) < 0.05f)
-			UnityEngine.Object.Instantiate(GetStructObj("internalorgans"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), Quaternion.identity);
-		if (UnityEngine.Random.Range(0f, 1f) < 0.5f)
-			UnityEngine.Object.Instantiate(GetStructObj("LoreNote"), pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f) + Vector2.up * UnityEngine.Random.Range(-1f, -6f), Quaternion.identity);
-		if (UnityEngine.Random.Range(0f, 1f) < 0.285f)
-			Utils.Create("epda", pos + Vector2.right * UnityEngine.Random.Range(-3f, 3f), UnityEngine.Random.value * 360f);
-		if (UnityEngine.Random.value < 0.2f)
-		{
-			Vector2 pos2 = pos + Vector2.right * UnityEngine.Random.Range(-1.5f, 1.5f);
-			Utils.Create("Special/defibrack", pos2, 0f);
-			bool num4 = UnityEngine.Random.value < 0.5f;
-			float value = UnityEngine.Random.value;
-			GameObject go = null;
-			if (UnityEngine.Random.value < 0.75f)
+			if (Random.Range(0f, 1f) < 0.05f)
 			{
-				go = Utils.Create("manualdefibrillator", pos2, 0f);
-				go.AddComponent<ItemLock>();
+				Object.Instantiate<GameObject>(GetStructObj("experimentflesh"), (Vector2)(val + Vector2.right * Random.Range(-3f, 3f)), Quaternion.identity);
+			}
+		}
+		if (Random.Range(0f, 1f) < 0.05f)
+		{
+			Object.Instantiate<GameObject>(GetStructObj("internalorgans"), (Vector2)(val + Vector2.right * Random.Range(-3f, 3f)), Quaternion.identity);
+		}
+		if (Random.Range(0f, 1f) < 0.5f)
+		{
+			Object.Instantiate<GameObject>(GetStructObj("LoreNote"), (Vector2)(val + Vector2.right * Random.Range(-3f, 3f) + Vector2.up * Random.Range(-1f, -6f)), Quaternion.identity);
+		}
+		if (Random.Range(0f, 1f) < 0.285f)
+		{
+			Utils.Create("epda", val + Vector2.right * Random.Range(-3f, 3f), Random.value * 360f);
+		}
+		if (Random.value < 0.2f)
+		{
+			Vector2 val3 = val + Vector2.right * Random.Range(-1.5f, 1.5f);
+			Utils.Create("Special/defibrack", val3, 0f);
+			bool flag = Random.value < 0.5f;
+			float value = Random.value;
+			GameObject val4 = null;
+			if (Random.value < 0.75f)
+			{
+				val4 = Utils.Create("manualdefibrillator", val3, 0f);
+				val4.AddComponent<ItemLock>();
 			}
 			else
 			{
-				go = Utils.Create("aed", pos2, 0f);
-				go.AddComponent<ItemLock>();
+				val4 = Utils.Create("aed", val3, 0f);
+				val4.AddComponent<ItemLock>();
 			}
-			if (!num4) go.GetComponent<Item>().battery.UnloadBattery(true);
-			else go.GetComponent<Item>().condition = value;
+			if (!flag)
+			{
+				val4.GetComponent<Item>().battery.UnloadBattery(true);
+			}
+			else
+			{
+				val4.GetComponent<Item>().condition = value;
+			}
 		}
 	}
 
-	// 塌陷坑:中心 90x90 范围内把实心块随机打碎(照搬原版)
-	static void CraterAt(Vector2 pos, Vector2Int vp)
+	private static void CraterAt(Vector2 pos, Vector2Int vp)
 	{
-		for (int j = 0; j < 90; j++)
+		//IL_0011: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0012: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0019: Unknown result type (might be due to invalid IL or missing references)
+		//IL_001e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0023: Unknown result type (might be due to invalid IL or missing references)
+		//IL_002a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_002f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0034: Unknown result type (might be due to invalid IL or missing references)
+		//IL_003e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0043: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0048: Unknown result type (might be due to invalid IL or missing references)
+		Vector2Int val = default(Vector2Int);
+		for (int i = 0; i < 90; i++)
 		{
-			for (int k = 0; k < 90; k++)
+			for (int j = 0; j < 90; j++)
 			{
-				float num2 = Vector2.Distance(pos + Vector2.up * k + Vector2.right * j - Vector2.one * 45f, pos);
-				if (num2 < 45f * UnityEngine.Random.Range(0f, 12f / (num2 * 0.8f)) && UnityEngine.Random.Range(0f, 1f) < 0.7f)
+				float num = Vector2.Distance(pos + Vector2.up * (float)j + Vector2.right * (float)i - Vector2.one * 45f, pos);
+				if (num < 45f * Random.Range(0f, 12f / (num * 0.8f)) && Random.Range(0f, 1f) < 0.7f)
 				{
-					Vector2Int v2 = new Vector2Int(Mathf.Clamp(vp.x - 45 + j, 0, (int)(W.width - 1)), Mathf.Clamp(vp.y - 45 + k + 2, 0, (int)(W.height - 1)));
-					if (WB[v2.x, v2.y] > 0)
-						WB[v2.x, v2.y] = (ushort)UnityEngine.Random.Range(0, 5);
+					val = new Vector2Int(Mathf.Clamp(vp.x - 45 + i, 0, (int)(W.width - 1)), Mathf.Clamp(vp.y - 45 + j + 2, 0, (int)(W.height - 1)));
+					if (WB[val.x, val.y] > 0)
+					{
+						WB[val.x, val.y] = (ushort)Random.Range(0, 5);
+					}
 				}
 			}
 		}
 	}
 
-	static void BioContainerAt(Vector2Int c, float lo, float hi, float chance)
+	private static void BioContainerAt(Vector2Int c, float lo, float hi, float chance)
 	{
-		int n = Poisson(UnityEngine.Random.Range(lo, hi) * W.totalLootRarity);
-		for (int i = 0; i < n; i++)
+		//IL_0021: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0022: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0027: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0028: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0040: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0041: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0046: Unknown result type (might be due to invalid IL or missing references)
+		//IL_004c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0068: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0084: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00a0: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00cd: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00ce: Unknown result type (might be due to invalid IL or missing references)
+		int num = Poisson(Random.Range(lo, hi) * W.totalLootRarity);
+		for (int i = 0; i < num; i++)
 		{
-			Vector2 pos = RandPosInChunk(c);
-			Vector2Int p;
-			if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
-			W.GenerateBlockCircle(pos, 16, 3, 0.8f, 0f);
-			W.GenerateBlockCircle(pos, 20, 4, 0.3f, 0f);
-			W.GenerateBlockCircle(pos, 16, 0, 0.15f, 0f);
-			W.GenerateObjectAtPos(p, GetStruct("BioContainer").transform.GetChild(0).GetComponent<Tilemap>(), chance, true);
-			W.GenerateEntityAtPos(W.BlockToWorldPos(p), GetStruct("BioContainer"));
-		}
-	}
-
-	// raycast=false 时位置=随机点本身(原版 SteelBridge 无 raycast)
-	static void BridgeAt(Vector2Int c, float lo, float hi, string res, float chance, bool raycast = true)
-	{
-		int n = Poisson(UnityEngine.Random.Range(lo, hi) * W.totalLootRarity);
-		for (int i = 0; i < n; i++)
-		{
-			Vector2 pos = RandPosInChunk(c);
-			if (raycast)
+			Vector2 val = RandPosInChunk(c);
+			if (GroundAbove(val, out var ground))
 			{
-				Vector2Int p;
-				if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
+				val = W.BlockToWorldPos(ground);
 			}
-			W.GenerateObjectAtPos(W.WorldToBlockPos(pos), GetStruct(res).GetComponent<Tilemap>(), chance, true);
-			W.GenerateEntityAtPos(pos, GetStruct(res));
+			W.GenerateBlockCircle(val, 16, (ushort)3, 0.8f, 0f, false, false, false);
+			W.GenerateBlockCircle(val, 20, (ushort)4, 0.3f, 0f, false, false, false);
+			W.GenerateBlockCircle(val, 16, (ushort)0, 0.15f, 0f, false, false, false);
+			W.GenerateObjectAtPos(ground, ((Component)GetStruct("BioContainer").transform.GetChild(0)).GetComponent<Tilemap>(), chance, true);
+			W.GenerateEntityAtPos(W.BlockToWorldPos(ground), GetStruct("BioContainer"));
 		}
 	}
 
-	static void PodAt(Vector2Int c, float lo, float hi, string res, float chance, bool entity = true)
+	private static void BridgeAt(Vector2Int c, float lo, float hi, string res, float chance, bool raycast = true)
 	{
-		int n = Poisson(UnityEngine.Random.Range(lo, hi) * W.totalLootRarity);
-		for (int i = 0; i < n; i++)
+		//IL_001e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_001f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0024: Unknown result type (might be due to invalid IL or missing references)
+		//IL_002c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0044: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0046: Unknown result type (might be due to invalid IL or missing references)
+		//IL_004b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0057: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0058: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0076: Unknown result type (might be due to invalid IL or missing references)
+		int num = Poisson(Random.Range(lo, hi) * W.totalLootRarity);
+		for (int i = 0; i < num; i++)
 		{
-			Vector2 pos = RandPosInChunk(c);
-			Vector2Int p;
-			if (GroundAbove(pos, out p)) pos = W.BlockToWorldPos(p);
-			W.GenerateBlockCircle(pos, 16, 3, 0.5f, 0f);
-			W.GenerateBlockCircle(pos, 20, 4, 0.2f, 0f);
-			W.GenerateObjectAtPos(p, GetStruct(res).GetComponent<Tilemap>(), chance, true);
-			if (entity) W.GenerateEntityAtPos(W.BlockToWorldPos(p), GetStruct(res));
-		}
-	}
-
-	static void IronVein(Vector2Int c, int width)
-	{
-		Vector2Int v = new Vector2Int(UnityEngine.Random.Range(c.x * CS, c.x * CS + CS), UnityEngine.Random.Range(c.y * CS, c.y * CS + CS));
-		int len = UnityEngine.Random.Range(1, 5);
-		for (int a = 0; a < len; a++)
-		{
-			for (int b = 0; b < width; b++)
+			Vector2 val = RandPosInChunk(c);
+			if (raycast && GroundAbove(val, out var ground))
 			{
-				if (v.x + a < W.width && v.y + b < W.height)
-					WB[v.x + a, v.y + b] = 5;
+				val = W.BlockToWorldPos(ground);
+			}
+			W.GenerateObjectAtPos(W.WorldToBlockPos(val), GetStruct(res).GetComponent<Tilemap>(), chance, true);
+			W.GenerateEntityAtPos(val, GetStruct(res));
+		}
+	}
+
+	private static void PodAt(Vector2Int c, float lo, float hi, string res, float chance, bool entity = true)
+	{
+		//IL_0021: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0022: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0027: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0028: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0040: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0041: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0046: Unknown result type (might be due to invalid IL or missing references)
+		//IL_004c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0068: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0084: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00ab: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00ac: Unknown result type (might be due to invalid IL or missing references)
+		int num = Poisson(Random.Range(lo, hi) * W.totalLootRarity);
+		for (int i = 0; i < num; i++)
+		{
+			Vector2 val = RandPosInChunk(c);
+			if (GroundAbove(val, out var ground))
+			{
+				val = W.BlockToWorldPos(ground);
+			}
+			W.GenerateBlockCircle(val, 16, (ushort)3, 0.5f, 0f, false, false, false);
+			W.GenerateBlockCircle(val, 20, (ushort)4, 0.2f, 0f, false, false, false);
+			W.GenerateObjectAtPos(ground, GetStruct(res).GetComponent<Tilemap>(), chance, true);
+			if (entity)
+			{
+				W.GenerateEntityAtPos(W.BlockToWorldPos(ground), GetStruct(res));
 			}
 		}
 	}
 
-	// ===== 地形(照搬原版 WorldGenerateTerrain 循环,范围=区块) =====
-	// 写入 dest 临时数组(由后台线程调用,不碰全局 WB)
-	static void GenChunkTerrainInto(Vector2Int c, ushort[,] wb)
+	private static void IronVein(Vector2Int c, int width)
 	{
-		int bx = c.x * CS, by = c.y * CS;
+		Vector2Int val = default(Vector2Int);
+		val = new Vector2Int(Random.Range(c.x * CS, c.x * CS + CS), Random.Range(c.y * CS, c.y * CS + CS));
+		int num = Random.Range(1, 5);
+		for (int i = 0; i < num; i++)
+		{
+			for (int j = 0; j < width; j++)
+			{
+				if (val.x + i < W.width && val.y + j < W.height)
+				{
+					WB[val.x + i, val.y + j] = 5;
+				}
+			}
+		}
+	}
+
+	private static void GenChunkTerrainInto(Vector2Int c, ushort[,] wb)
+	{
+		int num = c.x * CS;
+		int num2 = c.y * CS;
 		if (biome <= 1)
 		{
-			for (int x = bx; x < bx + CS; x++)
+			for (int i = num; i < num + CS; i++)
 			{
-				for (int y = by; y < by + CS; y++)
+				for (int j = num2; j < num2 + CS; j++)
 				{
-					caveNoise.SetFrequency(0.06f + frequencyMap.GetNoise(x, y) * 0.01f);
-					ushort block = (ushort)(caveNoise.GetNoise(x, y) > -0.715f ? 1 : 0);
-					float noise = dirtPerlin.GetNoise(x, y);
-					if (block > 0 && noise < -0.1f)
-						block = (ushort)(noise < -0.33f ? 16 : 2);
-					if (block > 0 && R(0f, 1f) > 0.99f)
-						block = (ushort)RI(1, 5);
-					float bm = biomeMap.GetNoise(x, y);
-					if (bm > 0.1f)
-						block = (ushort)RI(3, 5);
-					if (block > 0 && bm < -0.8f)
-						block = 15;
-					if (biome == 1 && y < W.height * 0.5f)
+					caveNoise.SetFrequency(0.06f + frequencyMap.GetNoise((float)i, (float)j) * 0.01f);
+					ushort num3 = ((caveNoise.GetNoise((float)i, (float)j) > -0.715f) ? ((ushort)1) : ((ushort)0));
+					float noise = dirtPerlin.GetNoise((float)i, (float)j);
+					if (num3 > 0 && noise < -0.1f)
 					{
-						float num3 = y / (float)W.height * 2f;
-						if (R(0f, 1f) > num3 && block == 2)
-							block = 12;
-						if (y < W.height * 0.33f && R(0f, 1f) > num3 * 3f && block == 1)
-							block = 13;
+						num3 = (ushort)((noise < -0.33f) ? 16u : 2u);
 					}
-					wb[x - bx, y - by] = block;
-				}
-			}
-		}
-		else if (biome == 2 || biome == 3)
-		{
-			for (int x = bx; x < bx + CS; x++)
-			{
-				for (int y = by; y < by + CS; y++)
-				{
-					float noise2 = biomeMap.GetNoise(x, y);
-					float num16 = frequencyMap.GetNoise(x, y) * 0.25f + 0.1f;
-					if (marbleMap.GetNoise(x, y) <= minMarble)
+					if (num3 > 0 && R(0f, 1f) > 0.99f)
 					{
-						ushort block = (ushort)((noise2 > num16 && dirtPerlin.GetNoise(x, y) < -0.4f)
-							? (noise2 < num16 + 0.1f ? 12 : 13) : 0);
-						if (caveNoise.GetNoise(x, y) > 0.65f)
-							block = 17;
-						if (noise2 > 0.75f)
-							block = 15;
-						if (biomeMap2.GetNoise(x, y) > 0.1f)
-							block = (ushort)RI(3, 5);
-						if (biome == 3 && block > 0 && RV() < 0.1f)
-							block = (ushort)(15 + RI(0, 2));
-						wb[x - bx, y - by] = block;
+						num3 = (ushort)RI(1, 5);
 					}
-					else
+					float noise2 = biomeMap.GetNoise((float)i, (float)j);
+					if (noise2 > 0.1f)
 					{
-						wb[x - bx, y - by] = (ushort)((noise2 > num16) ? (dirtPerlin.GetNoise(x, y) < -0.1f ? 18 : 19) : 0);
+						num3 = (ushort)RI(3, 5);
 					}
-					if (biome == 3 && toxicNoise.GetNoise(x, y) < -0.8f && RV() > 0.5f)
-						wb[x - bx, y - by] = 22;
-					if (biome == 3 && wb[x - bx, y - by] > 0 && RV() > (y + W.halfHeight) / (float)W.height)
-						wb[x - bx, y - by] = 23;
-				}
-			}
-		}
-		else
-		{
-			float lastFreq = float.NaN;
-			for (int x = bx; x < bx + CS; x++)
-			{
-				for (int y = by; y < by + CS; y++)
-				{
-					float freq = 0.0189f - y / (float)W.height * 0.002f;
-					if (freq != lastFreq)
+					if (num3 > 0 && noise2 < -0.8f)
 					{
-						marbleMap.SetFrequency(freq);
-						lastFreq = freq;
+						num3 = 15;
 					}
-					float num31 = marbleMap.GetNoise(x, y) + R(-0.1f, 0.1f);
-					ushort block;
-					if (num31 > 0.15f && num31 < 0.25f) block = 23;
-					else if (num31 >= 0.25f && num31 < 0.45f) block = 16;
-					else if (num31 >= 0.45f && num31 < 0.66f) block = 15;
-					else if (num31 >= 0.66f) block = 19;
-					else block = 0;
-					if (biomeMap2.GetNoise(x, y) < -0.735f)
-						block = 0;
-					wb[x - bx, y - by] = block;
-				}
-			}
-		}
-	}
-
-	// ===== 矿物(照搬 GenerateOres,按区块换算密度) =====
-	static void GenChunkOres(Vector2Int c)
-	{
-		ushort[,] wb = WB;
-		if (biome == 4)
-		{
-			for (int i = 0; i < 4; i++)
-			{
-				if (UnityEngine.Random.value < 0.00025f)
-				{
-					int x = c.x * CS + UnityEngine.Random.Range(0, CS);
-					int y = c.y * CS + UnityEngine.Random.Range(0, CS);
-					if (wb[x, y] > 0) wb[x, y] = 35;
+					if (biome == 1 && (float)j < (float)W.height * 0.5f)
+					{
+						float num4 = (float)j / (float)W.height * 2f;
+						if (R(0f, 1f) > num4 && num3 == 2)
+						{
+							num3 = 12;
+						}
+						if ((float)j < (float)W.height * 0.33f && R(0f, 1f) > num4 * 3f && num3 == 1)
+						{
+							num3 = 13;
+						}
+					}
+					wb[i - num, j - num2] = num3;
 				}
 			}
 			return;
 		}
-		if (UnityEngine.Random.value >= 0.5f) return;
-		int ox = c.x * CS + UnityEngine.Random.Range(0, CS);
-		int oy = c.y * CS + UnityEngine.Random.Range(0, CS);
-		if (wb[ox, oy] == 0) return;
-		for (int s = UnityEngine.Random.Range(1, 26); s > 0; s--)
+		if (biome == 2 || biome == 3)
 		{
-			if (wb[ox, oy] > 0) wb[ox, oy] = 34;
-			ox += UnityEngine.Random.value > 0.5f ? (UnityEngine.Random.value > 0.5f ? 1 : -1) : 0;
-			oy += UnityEngine.Random.value > 0.5f ? (UnityEngine.Random.value > 0.5f ? 1 : -1) : 0;
-			if (ox < 0 || oy < 0 || ox >= W.width || oy >= W.height) break;
+			for (int k = num; k < num + CS; k++)
+			{
+				for (int l = num2; l < num2 + CS; l++)
+				{
+					float noise3 = biomeMap.GetNoise((float)k, (float)l);
+					float num5 = frequencyMap.GetNoise((float)k, (float)l) * 0.25f + 0.1f;
+					if (marbleMap.GetNoise((float)k, (float)l) <= minMarble)
+					{
+						ushort num6 = (ushort)((noise3 > num5 && dirtPerlin.GetNoise((float)k, (float)l) < -0.4f) ? ((noise3 < num5 + 0.1f) ? 12u : 13u) : 0u);
+						if (caveNoise.GetNoise((float)k, (float)l) > 0.65f)
+						{
+							num6 = 17;
+						}
+						if (noise3 > 0.75f)
+						{
+							num6 = 15;
+						}
+						if (biomeMap2.GetNoise((float)k, (float)l) > 0.1f)
+						{
+							num6 = (ushort)RI(3, 5);
+						}
+						if (biome == 3 && num6 > 0 && RV() < 0.1f)
+						{
+							num6 = (ushort)(15 + RI(0, 2));
+						}
+						wb[k - num, l - num2] = num6;
+					}
+					else
+					{
+						wb[k - num, l - num2] = (ushort)((noise3 > num5) ? ((dirtPerlin.GetNoise((float)k, (float)l) < -0.1f) ? 18u : 19u) : 0u);
+					}
+					if (biome == 3 && toxicNoise.GetNoise((float)k, (float)l) < -0.8f && RV() > 0.5f)
+					{
+						wb[k - num, l - num2] = 22;
+					}
+					if (biome == 3 && wb[k - num, l - num2] > 0 && RV() > (float)(l + W.halfHeight) / (float)W.height)
+					{
+						wb[k - num, l - num2] = 23;
+					}
+				}
+			}
+			return;
 		}
-		// 块状矿脉(照搬原版地形循环 1811-1881,按 biomeDepth 分支:
-		// biomeDepth>0 银矿(5),biomeDepth==0 铜矿(11))
-		if (W.biomeDepth > 0)
+		float num7 = float.NaN;
+		for (int m = num; m < num + CS; m++)
 		{
-			VeinChunk(c, UnityEngine.Random.Range(0.35f, 0.5f), 5, 3, 6, 64, true);
-			VeinChunk(c, UnityEngine.Random.Range(0.35f, 0.5f), 5, 3, 6, 60, false);
-		}
-		else
-		{
-			VeinChunk(c, UnityEngine.Random.Range(0.35f, 0.4f), 11, 2, 6, 48, true);
-			VeinChunk(c, UnityEngine.Random.Range(0.35f, 0.4f), 11, 2, 6, 48, false);
+			for (int n = num2; n < num2 + CS; n++)
+			{
+				float num8 = 0.0189f - (float)n / (float)W.height * 0.002f;
+				if (num8 != num7)
+				{
+					marbleMap.SetFrequency(num8);
+					num7 = num8;
+				}
+				float num9 = marbleMap.GetNoise((float)m, (float)n) + R(-0.1f, 0.1f);
+				ushort num10 = (ushort)((num9 > 0.15f && num9 < 0.25f) ? 23 : ((num9 >= 0.25f && num9 < 0.45f) ? 16 : ((num9 >= 0.45f && num9 < 0.66f) ? 15 : ((num9 >= 0.66f) ? 19 : 0))));
+				if (biomeMap2.GetNoise((float)m, (float)n) < -0.735f)
+				{
+					num10 = 0;
+				}
+				wb[m - num, n - num2] = num10;
+			}
 		}
 	}
 
-	// 每条矿脉:起点块内随机,长 len(横/竖),宽 w,直接写 WB
-	static void VeinChunk(Vector2Int c, float amt, ushort block, int w, int lenMin, int lenMax, bool horizontal)
+	private static void GenChunkOres(Vector2Int c)
 	{
-		int n = Poisson(amt);
-		for (int i = 0; i < n; i++)
+		//IL_01cd: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01e9: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0209: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0226: Unknown result type (might be due to invalid IL or missing references)
+		ushort[,] wB = WB;
+		if (biome == 4)
 		{
-			Vector2Int v = new Vector2Int(c.x * CS + UnityEngine.Random.Range(0, CS), c.y * CS + UnityEngine.Random.Range(0, CS));
-			int len = UnityEngine.Random.Range(lenMin, lenMax);
-			for (int a = 0; a < len; a++)
+			for (int i = 0; i < 4; i++)
 			{
-				for (int b = 0; b < w; b++)
+				if (Random.value < 0.00025f)
 				{
-					int X = horizontal ? v.x + a : v.x + b;
-					int Y = horizontal ? v.y + b : v.y + a;
-					if (X < W.width && Y < W.height) WB[X, Y] = block;
+					int num = c.x * CS + Random.Range(0, CS);
+					int num2 = c.y * CS + Random.Range(0, CS);
+					if (wB[num, num2] > 0)
+					{
+						wB[num, num2] = 35;
+					}
+				}
+			}
+		}
+		else
+		{
+			if (Random.value >= 0.5f)
+			{
+				return;
+			}
+			int num3 = c.x * CS + Random.Range(0, CS);
+			int num4 = c.y * CS + Random.Range(0, CS);
+			if (wB[num3, num4] == 0)
+			{
+				return;
+			}
+			for (int num5 = Random.Range(1, 26); num5 > 0; num5--)
+			{
+				if (wB[num3, num4] > 0)
+				{
+					wB[num3, num4] = 34;
+				}
+				num3 += ((Random.value > 0.5f) ? ((Random.value > 0.5f) ? 1 : (-1)) : 0);
+				num4 += ((Random.value > 0.5f) ? ((Random.value > 0.5f) ? 1 : (-1)) : 0);
+				if (num3 < 0 || num4 < 0 || num3 >= W.width || num4 >= W.height)
+				{
+					break;
+				}
+			}
+			if (W.biomeDepth > 0)
+			{
+				VeinChunk(c, Random.Range(0.35f, 0.5f), 5, 3, 6, 64, horizontal: true);
+				VeinChunk(c, Random.Range(0.35f, 0.5f), 5, 3, 6, 60, horizontal: false);
+			}
+			else
+			{
+				VeinChunk(c, Random.Range(0.35f, 0.4f), 11, 2, 6, 48, horizontal: true);
+				VeinChunk(c, Random.Range(0.35f, 0.4f), 11, 2, 6, 48, horizontal: false);
+			}
+		}
+	}
+
+	private static void VeinChunk(Vector2Int c, float amt, ushort block, int w, int lenMin, int lenMax, bool horizontal)
+	{
+		int num = Poisson(amt);
+		Vector2Int val = default(Vector2Int);
+		for (int i = 0; i < num; i++)
+		{
+			val = new Vector2Int(c.x * CS + Random.Range(0, CS), c.y * CS + Random.Range(0, CS));
+			int num2 = Random.Range(lenMin, lenMax);
+			for (int j = 0; j < num2; j++)
+			{
+				for (int k = 0; k < w; k++)
+				{
+					int num3 = (horizontal ? (val.x + j) : (val.x + k));
+					int num4 = (horizontal ? (val.y + k) : (val.y + j));
+					if (num3 < W.width && num4 < W.height)
+					{
+						WB[num3, num4] = block;
+					}
 				}
 			}
 		}
 	}
 
-	// ===== 液体(照搬 PlaceLiquids,按区块换算密度) =====
-	static void GenChunkLiquids(Vector2Int c)
+	private static void GenChunkLiquids(Vector2Int c)
 	{
-		int bx = c.x * CS + CS / 2, by = c.y * CS + CS / 2;
+		int cx = c.x * CS + CS / 2;
+		int cy = c.y * CS + CS / 2;
 		if (biome == 0)
-			PlaceLiquidsChunk(128f, 1, 32, bx, by);
+		{
+			PlaceLiquidsChunk(128f, 1, 32, cx, cy);
+		}
 		else if (biome == 1)
 		{
-			PlaceLiquidsChunk(10f, 1, 400, bx, by);
-			PlaceLiquidsChunk(18f, 2, 128, bx, by);
+			PlaceLiquidsChunk(10f, 1, 400, cx, cy);
+			PlaceLiquidsChunk(18f, 2, 128, cx, cy);
 		}
 		else if (biome == 2 || biome == 3)
 		{
-			PlaceLiquidsChunk(50f, 1, 26, bx, by);
-			PlaceLiquidsChunk(15f, 3, 128, bx, by);
+			PlaceLiquidsChunk(50f, 1, 26, cx, cy);
+			PlaceLiquidsChunk(15f, 3, 128, cx, cy);
 		}
 		else
 		{
-			PlaceLiquidsChunk(30f, 1, 128, bx, by);
-			PlaceLiquidsChunk(10f, 2, 50, bx, by);
+			PlaceLiquidsChunk(30f, 1, 128, cx, cy);
+			PlaceLiquidsChunk(10f, 2, 50, cx, cy);
 		}
 	}
 
-	static void PlaceLiquidsChunk(float perChunk, byte type, int maxFill, int cx, int cy)
+	private static void PlaceLiquidsChunk(float perChunk, byte type, int maxFill, int cx, int cy)
 	{
-		float num = perChunk;
-		for (int i = 0; i < (int)num; i++)
+		//IL_004b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_004c: Unknown result type (might be due to invalid IL or missing references)
+		Vector2 pos = default(Vector2);
+		for (int i = 0; i < (int)perChunk; i++)
 		{
-			Vector2 pos = new Vector2(cx - CS / 2 + UnityEngine.Random.Range(0f, CS), cy - CS / 2 + UnityEngine.Random.Range(0f, CS));
+			pos = new Vector2((float)(cx - CS / 2) + Random.Range(0f, (float)CS), (float)(cy - CS / 2) + Random.Range(0f, (float)CS));
 			FluidManager.main.StartFill(WorldToBlockPos(pos), type, maxFill);
 		}
 	}
 
-	static Vector2Int WorldToBlockPos(Vector2 pos) => new Vector2Int(Mathf.FloorToInt(pos.x), Mathf.FloorToInt(pos.y));
-
-	// ===== 实体(照搬原版 WorldPlaceEntities 密度与检查,按区块换算) =====
-	static readonly string[] Crystals = { "BloodCrystal", "SoothingCrystal", "ReliefCrystal", "TurbulentCrystal", "OxygenCrystal", "EmissiveCrystal", "DigestionCrystal" };
-
-	static void GenChunkEntities(Vector2Int c)
+	private static Vector2Int WorldToBlockPos(Vector2 pos)
 	{
-		float tlr = W.totalLootRarity;
-		float ttr = W.totalTrapRarity;
-		float lrm = W.lootRarityMultiplier;
+		//IL_0000: Unknown result type (might be due to invalid IL or missing references)
+		//IL_000b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0016: Unknown result type (might be due to invalid IL or missing references)
+		return new Vector2Int(Mathf.FloorToInt(pos.x), Mathf.FloorToInt(pos.y));
+	}
+
+	private static void GenChunkEntities(Vector2Int c)
+	{
+		//IL_0039: Unknown result type (might be due to invalid IL or missing references)
+		//IL_006b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0071: Unknown result type (might be due to invalid IL or missing references)
+		//IL_009d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00cc: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00d2: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00da: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0109: Unknown result type (might be due to invalid IL or missing references)
+		//IL_010f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0117: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0144: Unknown result type (might be due to invalid IL or missing references)
+		//IL_014f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0177: Unknown result type (might be due to invalid IL or missing references)
+		//IL_017d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0185: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01ad: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01b3: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01bb: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01e3: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01e9: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01f1: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0219: Unknown result type (might be due to invalid IL or missing references)
+		//IL_021f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0227: Unknown result type (might be due to invalid IL or missing references)
+		//IL_024f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0255: Unknown result type (might be due to invalid IL or missing references)
+		//IL_025d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0290: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0296: Unknown result type (might be due to invalid IL or missing references)
+		//IL_029e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02d1: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02d7: Unknown result type (might be due to invalid IL or missing references)
+		//IL_02df: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0303: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0309: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0323: Unknown result type (might be due to invalid IL or missing references)
+		//IL_034b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0351: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0359: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0381: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0387: Unknown result type (might be due to invalid IL or missing references)
+		//IL_038f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_03b7: Unknown result type (might be due to invalid IL or missing references)
+		//IL_03bd: Unknown result type (might be due to invalid IL or missing references)
+		//IL_03c5: Unknown result type (might be due to invalid IL or missing references)
+		//IL_03f4: Unknown result type (might be due to invalid IL or missing references)
+		//IL_03fa: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0406: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0435: Unknown result type (might be due to invalid IL or missing references)
+		//IL_043b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0444: Unknown result type (might be due to invalid IL or missing references)
+		//IL_046c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0472: Unknown result type (might be due to invalid IL or missing references)
+		//IL_047a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_04a9: Unknown result type (might be due to invalid IL or missing references)
+		//IL_04af: Unknown result type (might be due to invalid IL or missing references)
+		//IL_04b7: Unknown result type (might be due to invalid IL or missing references)
+		//IL_04e6: Unknown result type (might be due to invalid IL or missing references)
+		//IL_04ec: Unknown result type (might be due to invalid IL or missing references)
+		//IL_04f4: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0523: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0529: Unknown result type (might be due to invalid IL or missing references)
+		//IL_056a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_059f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_05a5: Unknown result type (might be due to invalid IL or missing references)
+		//IL_05ad: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0606: Unknown result type (might be due to invalid IL or missing references)
+		//IL_060c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0614: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0643: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0649: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0651: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0680: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0686: Unknown result type (might be due to invalid IL or missing references)
+		//IL_068e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_06bd: Unknown result type (might be due to invalid IL or missing references)
+		//IL_06c3: Unknown result type (might be due to invalid IL or missing references)
+		//IL_06cb: Unknown result type (might be due to invalid IL or missing references)
+		//IL_06fa: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0700: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0708: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0737: Unknown result type (might be due to invalid IL or missing references)
+		//IL_073d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0745: Unknown result type (might be due to invalid IL or missing references)
+		//IL_076d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0773: Unknown result type (might be due to invalid IL or missing references)
+		//IL_077b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_07a3: Unknown result type (might be due to invalid IL or missing references)
+		//IL_07a9: Unknown result type (might be due to invalid IL or missing references)
+		//IL_07b1: Unknown result type (might be due to invalid IL or missing references)
+		//IL_07de: Unknown result type (might be due to invalid IL or missing references)
+		//IL_07fb: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0823: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0829: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0831: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0859: Unknown result type (might be due to invalid IL or missing references)
+		//IL_085f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0867: Unknown result type (might be due to invalid IL or missing references)
+		//IL_088f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0895: Unknown result type (might be due to invalid IL or missing references)
+		//IL_089d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_08d0: Unknown result type (might be due to invalid IL or missing references)
+		//IL_08d6: Unknown result type (might be due to invalid IL or missing references)
+		//IL_08de: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0906: Unknown result type (might be due to invalid IL or missing references)
+		//IL_090c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_091b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0943: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0949: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0951: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0979: Unknown result type (might be due to invalid IL or missing references)
+		//IL_097f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0987: Unknown result type (might be due to invalid IL or missing references)
+		//IL_09ab: Unknown result type (might be due to invalid IL or missing references)
+		//IL_09b1: Unknown result type (might be due to invalid IL or missing references)
+		//IL_09b9: Unknown result type (might be due to invalid IL or missing references)
+		//IL_09e1: Unknown result type (might be due to invalid IL or missing references)
+		//IL_09e7: Unknown result type (might be due to invalid IL or missing references)
+		//IL_09ef: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0a17: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0a1d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0a26: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0a78: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0a7e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0a86: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0ae3: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0ae9: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0af8: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0b27: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0b2d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0b35: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0b5d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0b63: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0b6b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0b93: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0b99: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0ba1: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0bc9: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0bcf: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0bd7: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0bff: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0c05: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0c0d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0c35: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0c3b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0c55: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0c79: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0c7f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0c87: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0cb6: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0cbc: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0cc4: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0cf1: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0cfc: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0d24: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0d2a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0d32: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0d5a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0d60: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0d68: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0d90: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0d96: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0d9e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0dd1: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0dd7: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0ddf: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0e12: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0e18: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0e20: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0e4f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0e55: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0e5d: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0e8c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0e92: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0e9a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0ec9: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0ecf: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0ed7: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0f06: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0f0c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0f14: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0f38: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0f3e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0f46: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0f79: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0f7f: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0f87: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0fba: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0fc0: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0fc8: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0ff0: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0ff6: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0ffe: Unknown result type (might be due to invalid IL or missing references)
+		//IL_1026: Unknown result type (might be due to invalid IL or missing references)
+		//IL_102c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_1034: Unknown result type (might be due to invalid IL or missing references)
+		//IL_105c: Unknown result type (might be due to invalid IL or missing references)
+		//IL_1062: Unknown result type (might be due to invalid IL or missing references)
+		//IL_106a: Unknown result type (might be due to invalid IL or missing references)
+		//IL_1092: Unknown result type (might be due to invalid IL or missing references)
+		//IL_1098: Unknown result type (might be due to invalid IL or missing references)
+		//IL_10a0: Unknown result type (might be due to invalid IL or missing references)
+		//IL_10c8: Unknown result type (might be due to invalid IL or missing references)
+		//IL_10ce: Unknown result type (might be due to invalid IL or missing references)
+		//IL_10d6: Unknown result type (might be due to invalid IL or missing references)
+		//IL_1105: Unknown result type (might be due to invalid IL or missing references)
+		//IL_110b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_1113: Unknown result type (might be due to invalid IL or missing references)
+		//IL_1135: Unknown result type (might be due to invalid IL or missing references)
+		float totalLootRarity = W.totalLootRarity;
+		float totalTrapRarity = W.totalTrapRarity;
+		float lootRarityMultiplier = W.lootRarityMultiplier;
 		for (int i = 0; i < 5; i++)
 		{
-			if (UnityEngine.Random.value < 0.015f)
-				D(c, Crystals[UnityEngine.Random.Range(0, Crystals.Length)], 1f, 1f, 2f, flip: true);
+			if (Random.value < 0.015f)
+			{
+				D(c, Crystals[Random.Range(0, Crystals.Length)], 1f, 1f, 2f, 0f, 0f, inGround: false, flip: true);
+			}
 		}
 		if (biome <= 1)
 		{
-			D(c, "glowplant", 2.7f, 3.5f, 1.25f, 10f, 0.25f, flip: true, check: SoftCheck);
-			D(c, "stoneplant", 0.4f, 0.5f, 1.9f, 10f, 0.1f, flip: true, check: SoftCheck);
-			D(c, "ceilingrye", 0.3f, 0.4f, 1f, 10f, 0.5f, flip: true, check: SoftCheck, dir: Vector2.up);
-			D(c, "medcrate", 0.18f * tlr, 0.2f * tlr, 3f, 180f);
-			D(c, "containercrate", 0.05f * tlr, 0.07f * tlr, 3f, 180f);
-			D(c, "foodbox", 0.1f * tlr, 0.13f * tlr, 3f, 180f);
-			D(c, "spikestabber", 0.4f * ttr, 0.5f * ttr);
-			D(c, "shadecrawler", 0.4f * ttr, 0.42f * ttr, 2f, 180f);
-			D(c, "corpse", 1f * lrm, 1.1f * lrm, check: CorpseCheck);
-			D(c, "animalcorpse", 0.6f * lrm, 0.7f * lrm, check: CorpseCheck);
-			D(c, "drillpod", 0.09f, 0.1f, inGround: true, flip: true);
+			D(c, "glowplant", 2.7f, 3.5f, 1.25f, 10f, 0.25f, inGround: false, flip: true, SoftCheck);
+			D(c, "stoneplant", 0.4f, 0.5f, 1.9f, 10f, 0.1f, inGround: false, flip: true, SoftCheck);
+			D(c, "ceilingrye", 0.3f, 0.4f, 1f, 10f, 0.5f, inGround: false, flip: true, SoftCheck, Vector2.up);
+			D(c, "medcrate", 0.18f * totalLootRarity, 0.2f * totalLootRarity, 3f, 180f);
+			D(c, "containercrate", 0.05f * totalLootRarity, 0.07f * totalLootRarity, 3f, 180f);
+			D(c, "foodbox", 0.1f * totalLootRarity, 0.13f * totalLootRarity, 3f, 180f);
+			D(c, "spikestabber", 0.4f * totalTrapRarity, 0.5f * totalTrapRarity);
+			D(c, "shadecrawler", 0.4f * totalTrapRarity, 0.42f * totalTrapRarity, 2f, 180f);
+			D(c, "corpse", 1f * lootRarityMultiplier, 1.1f * lootRarityMultiplier, 0f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
+			D(c, "animalcorpse", 0.6f * lootRarityMultiplier, 0.7f * lootRarityMultiplier, 0f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
+			D(c, "drillpod", 0.09f, 0.1f, 0f, 0f, 0f, inGround: true, flip: true);
 			if (biome > 0)
 			{
-				D(c, "barbedwirefence", 0.6f * ttr, 0.8f * ttr, 4.8f);
-				D(c, "beartrap", 0.2f * ttr, 0.25f * ttr, 1f);
-				D(c, "CaveTicks", 0.15f * ttr, 0.2f * ttr, 4f, 0f, 3f);
-				D(c, "geyser", 1.6f, 1.8f, 0.6f, check: SoftCheck);
+				D(c, "barbedwirefence", 0.6f * totalTrapRarity, 0.8f * totalTrapRarity, 4.8f);
+				D(c, "beartrap", 0.2f * totalTrapRarity, 0.25f * totalTrapRarity, 1f);
+				D(c, "CaveTicks", 0.15f * totalTrapRarity, 0.2f * totalTrapRarity, 4f, 0f, 3f);
+				D(c, "geyser", 1.6f, 1.8f, 0.6f, 0f, 0f, inGround: false, flip: false, SoftCheck);
 			}
 			else
 			{
-				D(c, "geyser", 0.7f, 0.8f, 0.6f, check: SoftCheck);
+				D(c, "geyser", 0.7f, 0.8f, 0.6f, 0f, 0f, inGround: false, flip: false, SoftCheck);
 			}
-			D(c, "jumppad", 0.6f * ttr, 0.8f * ttr);
-			D(c, "geotree", 2.7f, 3f, 3f, 6f, 0.15f, flip: true, check: SoilCheck);
-			D(c, "hydreed", 1.4f, 1.6f, 2.6f, 6f, 0.4f, flip: true, check: SoilCheck);
-			D(c, "leadbush", 2f, 2.2f, 0.6f, 6f, 0.1f, flip: true, check: SoilCheck);
+			D(c, "jumppad", 0.6f * totalTrapRarity, 0.8f * totalTrapRarity);
+			D(c, "geotree", 2.7f, 3f, 3f, 6f, 0.15f, inGround: false, flip: true, SoilCheck);
+			D(c, "hydreed", 1.4f, 1.6f, 2.6f, 6f, 0.4f, inGround: false, flip: true, SoilCheck);
+			D(c, "leadbush", 2f, 2.2f, 0.6f, 6f, 0.1f, inGround: false, flip: true, SoilCheck);
+			return;
 		}
-		else if (biome == 2 || biome == 3)
+		if (biome == 2 || biome == 3)
 		{
-			float m = biome == 2 ? 1f : 2f;
-			D(c, "glowplant", 2.4f * m, 2.5f * m, 1.25f, 10f, 0.25f, flip: true, check: SandCheck);
-			D(c, "stoneplant", 0.4f * (biome == 2 ? 1f : 3f), 0.5f * (biome == 2 ? 1f : 3f), 1.9f, 10f, 0.1f, flip: true, check: SandCheck);
-			D(c, "cactus", 1.4f, 1.6f, 2.1f, 10f, 0.3f, flip: true, check: SandCheck);
-			D(c, "sandrose", 1.3f, 1.4f, 1.5f, 10f, flip: true, check: SandCheck);
-			D(c, "drybush", 6f, 7f, 2f, 20f, flip: true, check: SandCheck);
-			D(c, "brownshroom", 4f, 5f, 0.9f, 10f, flip: true, check: SandCheck);
-			D(c, "stalagmite", 10f, 15f, 2.8f, 0f, 0.15f, flip: true, check: StoneCheck);
-			D(c, "jumppad", 0.25f * ttr, 0.35f * ttr);
-			D(c, "landmine", 0.13f * ttr, 0.16f * ttr, 0.4f);
-			D(c, "ceilingrye", 0.08f, 0.1f, 1f, 10f, 0.5f, flip: true, check: SoftCheck, dir: Vector2.up);
+			float num = ((biome == 2) ? 1f : 2f);
+			D(c, "glowplant", 2.4f * num, 2.5f * num, 1.25f, 10f, 0.25f, inGround: false, flip: true, SandCheck);
+			D(c, "stoneplant", 0.4f * ((biome == 2) ? 1f : 3f), 0.5f * ((biome == 2) ? 1f : 3f), 1.9f, 10f, 0.1f, inGround: false, flip: true, SandCheck);
+			D(c, "cactus", 1.4f, 1.6f, 2.1f, 10f, 0.3f, inGround: false, flip: true, SandCheck);
+			D(c, "sandrose", 1.3f, 1.4f, 1.5f, 10f, 0f, inGround: false, flip: true, SandCheck);
+			D(c, "drybush", 6f, 7f, 2f, 20f, 0f, inGround: false, flip: true, SandCheck);
+			D(c, "brownshroom", 4f, 5f, 0.9f, 10f, 0f, inGround: false, flip: true, SandCheck);
+			D(c, "stalagmite", 10f, 15f, 2.8f, 0f, 0.15f, inGround: false, flip: true, StoneCheck);
+			D(c, "jumppad", 0.25f * totalTrapRarity, 0.35f * totalTrapRarity);
+			D(c, "landmine", 0.13f * totalTrapRarity, 0.16f * totalTrapRarity, 0.4f);
+			D(c, "ceilingrye", 0.08f, 0.1f, 1f, 10f, 0.5f, inGround: false, flip: true, SoftCheck, Vector2.up);
 			if (biome == 3)
 			{
-				D(c, "spentfuel", 0.3f * ttr, 0.35f * ttr, 1.875f);
-				D(c, "soundcannon", 0.4f * ttr, 0.45f * ttr, 1f);
-				D(c, "foodbox", 0.1f * tlr, 0.13f * tlr, 3f, 180f);
-				D(c, "pop", 3f * tlr, 4f * tlr, 2f, 20f, 0.2f, flip: true, check: SandCheck);
-				D(c, "coil", 0.2f * ttr, 0.3f * ttr, 2f);
+				D(c, "spentfuel", 0.3f * totalTrapRarity, 0.35f * totalTrapRarity, 1.875f);
+				D(c, "soundcannon", 0.4f * totalTrapRarity, 0.45f * totalTrapRarity, 1f);
+				D(c, "foodbox", 0.1f * totalLootRarity, 0.13f * totalLootRarity, 3f, 180f);
+				D(c, "pop", 3f * totalLootRarity, 4f * totalLootRarity, 2f, 20f, 0.2f, inGround: false, flip: true, SandCheck);
+				D(c, "coil", 0.2f * totalTrapRarity, 0.3f * totalTrapRarity, 2f);
 			}
 			else
 			{
-				D(c, "wallbiter", 0.12f * ttr, 0.13f * ttr, 4.8f);
-				D(c, "shadecrawler", 0.2f * ttr, 0.2f * ttr, 4.8f);
+				D(c, "wallbiter", 0.12f * totalTrapRarity, 0.13f * totalTrapRarity, 4.8f);
+				D(c, "shadecrawler", 0.2f * totalTrapRarity, 0.2f * totalTrapRarity, 4.8f);
 				D(c, "droppings", 0.75f, 0.82f);
-				D(c, "beartrap", 0.1f * ttr, 0.2f * ttr, 1f);
-				D(c, "barbedwirefence", 0.7f * ttr, 0.8f * ttr, 4.8f);
+				D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, 1f);
+				D(c, "barbedwirefence", 0.7f * totalTrapRarity, 0.8f * totalTrapRarity, 4.8f);
 			}
-			D(c, "rag", 0.12f * lrm * (biome == 2 ? 1f : 2.5f), 0.2f * lrm * (biome == 2 ? 1f : 2.5f), 1f);
-			D(c, "corpse", 0.75f * lrm * (biome == 2 ? 1f : 2f), 0.82f * lrm * (biome == 2 ? 1f : 2f), check: CorpseCheck);
+			D(c, "rag", 0.12f * lootRarityMultiplier * ((biome == 2) ? 1f : 2.5f), 0.2f * lootRarityMultiplier * ((biome == 2) ? 1f : 2.5f), 1f);
+			D(c, "corpse", 0.75f * lootRarityMultiplier * ((biome == 2) ? 1f : 2f), 0.82f * lootRarityMultiplier * ((biome == 2) ? 1f : 2f), 0f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
+			return;
 		}
-		else
+		D(c, "glowplant", 0.2f, 0.3f, 1.25f, 10f, 0.25f, inGround: false, flip: true, SoilCheck);
+		D(c, "shadecrawler", 0.45f * totalTrapRarity, 0.5f * totalTrapRarity, 2f, 180f);
+		D(c, "wallbiter", 0.1f * totalTrapRarity, 0.11f * totalTrapRarity, 4.8f);
+		D(c, "thornbackyoung", 0.24f * totalTrapRarity, 0.26f * totalTrapRarity, 4.8f);
+		D(c, "overgrowntick", 0.1f * totalTrapRarity, 0.12f * totalTrapRarity, 4.8f);
+		D(c, "caveticks", 0.15f * totalTrapRarity, 0.16f * totalTrapRarity, 4.8f);
+		if (Random.value < 0.012f)
 		{
-			D(c, "glowplant", 0.2f, 0.3f, 1.25f, 10f, 0.25f, flip: true, check: SoilCheck);
-			D(c, "shadecrawler", 0.45f * ttr, 0.5f * ttr, 2f, 180f);
-			D(c, "wallbiter", 0.1f * ttr, 0.11f * ttr, 4.8f);
-			D(c, "thornbackyoung", 0.24f * ttr, 0.26f * ttr, 4.8f);
-			D(c, "overgrowntick", 0.1f * ttr, 0.12f * ttr, 4.8f);
-			D(c, "caveticks", 0.15f * ttr, 0.16f * ttr, 4.8f);
-			if (UnityEngine.Random.value < 0.012f) D(c, "thornbackelder", 1f, 1f);
-			D(c, "stoneplant", 0.4f, 0.5f, 1.9f, 10f, 0.1f, flip: true, check: SoilCheck);
-			D(c, "ceilingrye", 0.65f, 0.8f, 1f, 10f, 0.5f, flip: true, check: SoftCheck, dir: Vector2.up);
-			D(c, "medcrate", 0.18f * tlr, 0.2f * tlr, 3f, 180f);
-			D(c, "containercrate", 0.05f * tlr, 0.07f * tlr, 3f, 180f);
-			D(c, "foodbox", 0.1f * tlr, 0.13f * tlr, 3f, 180f);
-			D(c, "corpse", 1.1f * lrm, 1.2f * lrm, check: CorpseCheck);
-			D(c, "animalcorpse", 0.9f * lrm, 0.95f * lrm, check: CorpseCheck);
-			D(c, "geotree", 0.4f, 0.5f, 3f, 6f, 0.15f, flip: true, check: SoilCheck);
-			D(c, "browncap", 0.4f, 0.5f, 3f, 6f, 0.15f, flip: true, check: SoilCheck);
-			D(c, "hydreed", 0.6f, 0.7f, 2.6f, 6f, 0.4f, flip: true, check: SoilCheck);
-			D(c, "leadbush", 1.1f, 1.2f, 0.6f, 6f, 0.1f, flip: true, check: SoilCheck);
-			D(c, "droppings", 3.7f, 4f);
-			D(c, "pop", 1f * tlr, 1.1f * tlr, 2f, 20f, 0.2f, flip: true, check: SoilCheck);
-			D(c, "bananaplant", 1.9f * ttr, 2f * ttr, 0.4f, 15f, 0.1f, flip: true, check: SoilCheck);
-			D(c, "coil", 0.2f * ttr, 0.3f * ttr, 2f);
-			D(c, "beartrap", 0.1f * ttr, 0.2f * ttr, 1f);
-			D(c, "jumppad", 0.25f * ttr, 0.35f * ttr);
-			D(c, "spikestabber", 0.4f * ttr, 0.5f * ttr);
-			D(c, "grabberplant", 0.4f * ttr, 0.5f * ttr);
-			D(c, "geyser", 0.7f, 0.8f, 0.6f, check: SoftCheck);
-			D(c, "skullcrusher", 1.1f, 1.2f, 1f, 10f, flip: true, dir: Vector2.up);
+			D(c, "thornbackelder", 1f, 1f);
 		}
+		D(c, "stoneplant", 0.4f, 0.5f, 1.9f, 10f, 0.1f, inGround: false, flip: true, SoilCheck);
+		D(c, "ceilingrye", 0.65f, 0.8f, 1f, 10f, 0.5f, inGround: false, flip: true, SoftCheck, Vector2.up);
+		D(c, "medcrate", 0.18f * totalLootRarity, 0.2f * totalLootRarity, 3f, 180f);
+		D(c, "containercrate", 0.05f * totalLootRarity, 0.07f * totalLootRarity, 3f, 180f);
+		D(c, "foodbox", 0.1f * totalLootRarity, 0.13f * totalLootRarity, 3f, 180f);
+		D(c, "corpse", 1.1f * lootRarityMultiplier, 1.2f * lootRarityMultiplier, 0f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
+		D(c, "animalcorpse", 0.9f * lootRarityMultiplier, 0.95f * lootRarityMultiplier, 0f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
+		D(c, "geotree", 0.4f, 0.5f, 3f, 6f, 0.15f, inGround: false, flip: true, SoilCheck);
+		D(c, "browncap", 0.4f, 0.5f, 3f, 6f, 0.15f, inGround: false, flip: true, SoilCheck);
+		D(c, "hydreed", 0.6f, 0.7f, 2.6f, 6f, 0.4f, inGround: false, flip: true, SoilCheck);
+		D(c, "leadbush", 1.1f, 1.2f, 0.6f, 6f, 0.1f, inGround: false, flip: true, SoilCheck);
+		D(c, "droppings", 3.7f, 4f);
+		D(c, "pop", 1f * totalLootRarity, 1.1f * totalLootRarity, 2f, 20f, 0.2f, inGround: false, flip: true, SoilCheck);
+		D(c, "bananaplant", 1.9f * totalTrapRarity, 2f * totalTrapRarity, 0.4f, 15f, 0.1f, inGround: false, flip: true, SoilCheck);
+		D(c, "coil", 0.2f * totalTrapRarity, 0.3f * totalTrapRarity, 2f);
+		D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, 1f);
+		D(c, "jumppad", 0.25f * totalTrapRarity, 0.35f * totalTrapRarity);
+		D(c, "spikestabber", 0.4f * totalTrapRarity, 0.5f * totalTrapRarity);
+		D(c, "grabberplant", 0.4f * totalTrapRarity, 0.5f * totalTrapRarity);
+		D(c, "geyser", 0.7f, 0.8f, 0.6f, 0f, 0f, inGround: false, flip: false, SoftCheck);
+		D(c, "skullcrusher", 1.1f, 1.2f, 1f, 10f, 0f, inGround: false, flip: true, null, Vector2.up);
 	}
 
-	// 数据层"向下/指定方向找地面"(模拟原版 Physics2D.Raycast,不依赖 collider 时序)
-	static bool FindSurface(int wx, int wy, Vector2 dir, out int hx, out int hy)
+	private static bool FindSurface(int wx, int wy, Vector2 dir, out int hx, out int hy)
 	{
-		hx = wx; hy = wy;
-		int sx = (int)Mathf.Sign(dir.x), sy = (int)Mathf.Sign(dir.y);
+		//IL_0008: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0015: Unknown result type (might be due to invalid IL or missing references)
+		hx = wx;
+		hy = wy;
+		int num = (int)Mathf.Sign(dir.x);
+		int num2 = (int)Mathf.Sign(dir.y);
 		for (int i = 0; i < 16; i++)
 		{
-			int bx = wx + sx * i, by = wy + sy * i;
-			if (bx < 0 || by < 0 || bx >= W.width || by >= W.height) return false;
-			if (WB[bx, by] > 0) { hx = bx; hy = by; return true; }
+			int num3 = wx + num * i;
+			int num4 = wy + num2 * i;
+			if (num3 < 0 || num4 < 0 || num3 >= W.width || num4 >= W.height)
+			{
+				return false;
+			}
+			if (WB[num3, num4] > 0)
+			{
+				hx = num3;
+				hy = num4;
+				return true;
+			}
 		}
 		return false;
 	}
 
-	// 检查委托(原版 WorldPlaceEntities 的 PlaceCheckDelegate 逻辑)
-	static bool SoftCheck(int bx, int by) => WB[bx, by] < 3 || IsSoil(bx, by);
-	static bool SoilCheck(int bx, int by) => IsSoil(bx, by);
-	static bool SandCheck(int bx, int by) => WB[bx, by] == 12 || WB[bx, by] == 13 || IsSoil(bx, by);
-	static bool StoneCheck(int bx, int by) => WB[bx, by] == 17 || WB[bx, by] == 18 || WB[bx, by] == 19;
-	static bool CorpseCheck(int bx, int by) => WB[bx, by] > 0 && WB[bx - 1, by] > 0 && WB[bx + 1, by] > 0;
-
-	static bool IsSoil(int bx, int by)
+	private static bool SoftCheck(int bx, int by)
 	{
-		ushort b = WB[bx, by];
-		return b == 2 || b == 15 || b == 16 || b == 23 || (b > 30 && b < 34);
+		return WB[bx, by] < 3 || IsSoil(bx, by);
 	}
 
-	// 放置一个实体(模拟原版 DistributeEntities 对单点)
-	static void D(Vector2Int c, string name, float min, float max, float yOff = 0f, float rot = 0f, float yDev = 0f, bool inGround = false, bool flip = false, Func<int, int, bool> check = null, Vector2 dir = default(Vector2))
+	private static bool SoilCheck(int bx, int by)
 	{
-		float num = UnityEngine.Random.Range(min, max);
-		int count = (int)num;
-		if (UnityEngine.Random.value < num - count) count++;
-		int bx = c.x * CS, by = c.y * CS;
-		for (int n = 0; n < count; n++)
+		return IsSoil(bx, by);
+	}
+
+	private static bool SandCheck(int bx, int by)
+	{
+		return WB[bx, by] == 12 || WB[bx, by] == 13 || IsSoil(bx, by);
+	}
+
+	private static bool StoneCheck(int bx, int by)
+	{
+		return WB[bx, by] == 17 || WB[bx, by] == 18 || WB[bx, by] == 19;
+	}
+
+	private static bool CorpseCheck(int bx, int by)
+	{
+		return WB[bx, by] > 0 && WB[bx - 1, by] > 0 && WB[bx + 1, by] > 0;
+	}
+
+	private static bool IsSoil(int bx, int by)
+	{
+		ushort num = WB[bx, by];
+		return num == 2 || num == 15 || num == 16 || num == 23 || (num > 30 && num < 34);
+	}
+
+	private static void D(Vector2Int c, string name, float min, float max, float yOff = 0f, float rot = 0f, float yDev = 0f, bool inGround = false, bool flip = false, Func<int, int, bool> check = null, Vector2 dir = default(Vector2))
+	{
+		//IL_0084: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0088: Unknown result type (might be due to invalid IL or missing references)
+		//IL_008e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0097: Unknown result type (might be due to invalid IL or missing references)
+		//IL_009b: Unknown result type (might be due to invalid IL or missing references)
+		//IL_011e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0120: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0124: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0129: Unknown result type (might be due to invalid IL or missing references)
+		//IL_012e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0147: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0171: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0176: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01cd: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01d7: Expected O, but got Unknown
+		//IL_01fa: Unknown result type (might be due to invalid IL or missing references)
+		//IL_01ff: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0218: Unknown result type (might be due to invalid IL or missing references)
+		float num = Random.Range(min, max);
+		int num2 = (int)num;
+		if (Random.value < num - (float)num2)
 		{
-			int wx = bx + UnityEngine.Random.Range(0, CS);
-			int wy = by + UnityEngine.Random.Range(0, CS);
-			if (WB[wx, wy] > 0) continue;
-			int hx, hy;
-			if (!FindSurface(wx, wy, dir == default(Vector2) ? Vector2.down : dir, out hx, out hy)) continue;
-			if (check != null && !check(hx, hy)) continue;
-			GameObject prefab = GetStructObj(name);
-			if (prefab == null) continue;
-			Vector2 point = new Vector2(hx + 0.5f, hy + 1f);
-			float off = UnityEngine.Random.Range(yOff - yDev, yOff + yDev);
-			GameObject go = UnityEngine.Object.Instantiate(prefab, point - dir * off, Quaternion.Euler(0f, 0f, UnityEngine.Random.Range(-rot, rot)));
-			BuildingEntity be = go.GetComponent<BuildingEntity>();
-			if (be != null)
+			num2++;
+		}
+		int num3 = c.x * CS;
+		int num4 = c.y * CS;
+		Vector2 val = default(Vector2);
+		for (int i = 0; i < num2; i++)
+		{
+			int num5 = num3 + Random.Range(0, CS);
+			int num6 = num4 + Random.Range(0, CS);
+			if (WB[num5, num6] > 0 || !FindSurface(num5, num6, (dir == default(Vector2)) ? Vector2.down : dir, out var hx, out var hy) || (check != null && !check(hx, hy)))
 			{
-				be.blockPlacedOn = new Vector2Int(hx, hy);
-				if (inGround && W.ChunkUpdated[c.x, c.y] != null)
-					W.ChunkUpdated[c.x, c.y].AddListener(be.CheckSeating);
+				continue;
 			}
-			if (flip && UnityEngine.Random.value < 0.5f)
+			GameObject structObj = GetStructObj(name);
+			if ((Object)(object)structObj == (Object)null)
 			{
-				Vector3 s = go.transform.localScale;
-				s.x *= -1f;
-				go.transform.localScale = s;
+				continue;
+			}
+			val = new Vector2((float)hx + 0.5f, (float)hy + 1f);
+			float num7 = Random.Range(yOff - yDev, yOff + yDev);
+			GameObject val2 = Object.Instantiate<GameObject>(structObj, (Vector2)(val - dir * num7), Quaternion.Euler(0f, 0f, Random.Range(0f - rot, rot)));
+			BuildingEntity component = val2.GetComponent<BuildingEntity>();
+			if ((Object)(object)component != (Object)null)
+			{
+				component.blockPlacedOn = new Vector2Int(hx, hy);
+				if (inGround && W.ChunkUpdated[c.x, c.y] != null)
+				{
+					W.ChunkUpdated[c.x, c.y].AddListener(new UnityAction(component.CheckSeating));
+				}
+			}
+			if (flip && Random.value < 0.5f)
+			{
+				Vector3 localScale = val2.transform.localScale;
+				localScale.x *= -1f;
+				val2.transform.localScale = localScale;
 			}
 		}
 	}

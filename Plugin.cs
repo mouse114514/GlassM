@@ -13,37 +13,47 @@ public sealed class Plugin : BaseUnityPlugin
 
 	private void Awake()
 	{
+		//IL_002e: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0034: Expected O, but got Unknown
 		Log = Logger;
-		Logger.LogInfo("GlassM loading");
+		Logger.LogInfo((object)"GlassM loading");
 		try
 		{
-			var harmony = new Harmony(Info.Metadata.GUID);
-			Patch(harmony, typeof(WorldGeneration), "WorldGenerateTerrain", "WorldGenerateTerrain_Prefix", true);
-			Patch(harmony, typeof(WorldGeneration), "UpdateWorld", "UpdateWorld_Prefix", true);
-			Patch(harmony, typeof(WorldGeneration), "WorldPlaceEntities", "WorldPlaceEntities_Prefix", true);
-			Patch(harmony, typeof(WorldGeneration), "WorldGenerateStructures", "WorldGenerateStructures_Prefix", true);
-			Patch(harmony, typeof(WorldGeneration), "Update", "Update_Postfix", false);
-			Patch(harmony, typeof(WorldGeneration), "Clear", "Clear_Postfix", false);
-			Patch(harmony, typeof(Body), "PlaceBody", "PlaceBody_Prefix", true);
-			Logger.LogInfo("GlassM: patches applied");
+			Harmony harmony = new Harmony(Info.Metadata.GUID);
+			Patch(harmony, typeof(WorldGeneration), "WorldGenerateTerrain", "WorldGenerateTerrain_Prefix", prefix: true);
+			Patch(harmony, typeof(WorldGeneration), "UpdateWorld", "UpdateWorld_Prefix", prefix: true);
+			Patch(harmony, typeof(WorldGeneration), "WorldPlaceEntities", "WorldPlaceEntities_Prefix", prefix: true);
+			Patch(harmony, typeof(WorldGeneration), "WorldGenerateStructures", "WorldGenerateStructures_Prefix", prefix: true);
+			Patch(harmony, typeof(WorldGeneration), "Update", "Update_Postfix", prefix: false);
+			Patch(harmony, typeof(WorldGeneration), "Clear", "Clear_Postfix", prefix: false);
+			Patch(harmony, typeof(Body), "PlaceBody", "PlaceBody_Prefix", prefix: true);
+			Logger.LogInfo((object)"GlassM: patches applied");
 		}
 		catch (Exception ex)
 		{
-			Logger.LogError("GlassM: patch failed " + ex);
+			Logger.LogError((object)("GlassM: patch failed " + ex));
 		}
 	}
 
-	static void Patch(Harmony harmony, Type targetType, string target, string patchMethod, bool prefix)
+	private static void Patch(Harmony harmony, Type targetType, string target, string patchMethod, bool prefix)
 	{
-		var method = AccessTools.Method(targetType, target);
-		if (method == null)
+		//IL_0041: Unknown result type (might be due to invalid IL or missing references)
+		//IL_0047: Expected O, but got Unknown
+		MethodInfo methodInfo = AccessTools.Method(targetType, target, (Type[])null, (Type[])null);
+		if (methodInfo == null)
 		{
-			Log.LogError("CS: target method not found: " + target);
+			Log.LogError((object)("CS: target method not found: " + target));
 			return;
 		}
-		var pm = new HarmonyMethod(typeof(Patches).GetMethod(patchMethod, BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public));
-		if (prefix) harmony.Patch(method, prefix: pm);
-		else harmony.Patch(method, postfix: pm);
-		Log.LogInfo("CS: patched " + target);
+		HarmonyMethod val = new HarmonyMethod(typeof(Patches).GetMethod(patchMethod, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic));
+		if (prefix)
+		{
+			harmony.Patch((MethodBase)methodInfo, val, (HarmonyMethod)null, (HarmonyMethod)null, (HarmonyMethod)null, (HarmonyMethod)null);
+		}
+		else
+		{
+			harmony.Patch((MethodBase)methodInfo, (HarmonyMethod)null, val, (HarmonyMethod)null, (HarmonyMethod)null, (HarmonyMethod)null);
+		}
+		Log.LogInfo((object)("CS: patched " + target));
 	}
 }
