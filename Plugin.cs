@@ -14,10 +14,10 @@ public sealed class Plugin : BaseUnityPlugin
 	private void Awake()
 	{
 		Log = Logger;
-		Logger.LogInfo("GlassM loading");
+		Log.LogInfo("GlassM loading");
 		try
 		{
-			var harmony = new Harmony(Info.Metadata.GUID);
+			Harmony harmony = new Harmony(Info.Metadata.GUID);
 			Patch(harmony, typeof(WorldGeneration), "WorldGenerateTerrain", "WorldGenerateTerrain_Prefix", true);
 			Patch(harmony, typeof(WorldGeneration), "UpdateWorld", "UpdateWorld_Prefix", true);
 			Patch(harmony, typeof(WorldGeneration), "WorldPlaceEntities", "WorldPlaceEntities_Prefix", true);
@@ -25,25 +25,27 @@ public sealed class Plugin : BaseUnityPlugin
 			Patch(harmony, typeof(WorldGeneration), "Update", "Update_Postfix", false);
 			Patch(harmony, typeof(WorldGeneration), "Clear", "Clear_Postfix", false);
 			Patch(harmony, typeof(Body), "PlaceBody", "PlaceBody_Prefix", true);
-			Logger.LogInfo("GlassM: patches applied");
+			Log.LogInfo("GlassM: patches applied");
 		}
 		catch (Exception ex)
 		{
-			Logger.LogError("GlassM: patch failed " + ex);
+			Log.LogError("GlassM: patch failed " + ex);
 		}
 	}
 
-	static void Patch(Harmony harmony, Type targetType, string target, string patchMethod, bool prefix)
+	private static void Patch(Harmony harmony, Type targetType, string target, string patchMethod, bool prefix)
 	{
-		var method = AccessTools.Method(targetType, target);
-		if (method == null)
+		MethodInfo methodInfo = AccessTools.Method(targetType, target);
+		if (methodInfo == null)
 		{
 			Log.LogError("CS: target method not found: " + target);
 			return;
 		}
-		var pm = new HarmonyMethod(typeof(Patches).GetMethod(patchMethod, BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public));
-		if (prefix) harmony.Patch(method, prefix: pm);
-		else harmony.Patch(method, postfix: pm);
+		HarmonyMethod hm = new HarmonyMethod(typeof(Patches).GetMethod(patchMethod, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic));
+		if (prefix)
+			harmony.Patch(methodInfo, prefix: hm);
+		else
+			harmony.Patch(methodInfo, postfix: hm);
 		Log.LogInfo("CS: patched " + target);
 	}
 }

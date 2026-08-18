@@ -1,104 +1,106 @@
 using System;
+using System.Text;
 using HarmonyLib;
 using UnityEngine;
+using Object = UnityEngine.Object;
 
 namespace GlassM;
 
-// =====================================================================
-// Patch:把原版 GenerateWorld 的全图生成替换为分区块流式生成。
-// 原版流程 Terrain → Borders → UpdateWorld → PlacePlayer → PlaceEntities
-// → Structures → Finish;其中全图循环由 ChunkStreamer 按区块接管。
-// =====================================================================
 public static class Patches
 {
-	// 地形生成:初始化噪声 + 同步生成中心 9x9 + 其余入后台队列
 	[HarmonyPatch(typeof(WorldGeneration), "WorldGenerateTerrain")]
 	[HarmonyPrefix]
-	static bool WorldGenerateTerrain_Prefix(WorldGeneration __instance)
+	private static bool WorldGenerateTerrain_Prefix(WorldGeneration __instance)
 	{
-		Plugin.Log.LogInfo("CS: WorldGenerateTerrain intercepted, biome=" + __instance.biomeDepth);
+		Plugin.Log.LogInfo((object)("CS: WorldGenerateTerrain intercepted, biome=" + __instance.biomeDepth));
 		ChunkStreamer.OnNewWorld(__instance);
 		ChunkStreamer.InitTerrain(__instance);
 		ChunkStreamer.GenerateInitial();
-		Plugin.Log.LogInfo("CS: initial gen done, queue=" + ChunkStreamer.QueueCount);
+		Plugin.Log.LogInfo((object)("CS: initial gen done, queue=" + ChunkStreamer.QueueCount));
 		return false;
 	}
 
-	// 全图 tile 刷新:分块生成已直接渲染,跳过(中心区由区块渲染覆盖)
 	[HarmonyPatch(typeof(WorldGeneration), "UpdateWorld")]
 	[HarmonyPrefix]
-	static bool UpdateWorld_Prefix()
+	private static bool UpdateWorld_Prefix()
 	{
-		Plugin.Log.LogInfo("CS: UpdateWorld skipped");
+		Plugin.Log.LogInfo((object)"CS: UpdateWorld skipped");
 		return false;
 	}
 
-	// 实体:并入区块生成,全图阶段跳过
 	[HarmonyPatch(typeof(WorldGeneration), "WorldPlaceEntities")]
 	[HarmonyPrefix]
-	static bool WorldPlaceEntities_Prefix()
+	private static bool WorldPlaceEntities_Prefix()
 	{
-		Plugin.Log.LogInfo("CS: WorldPlaceEntities skipped");
+		Plugin.Log.LogInfo((object)"CS: WorldPlaceEntities skipped");
 		return false;
 	}
 
-	// 结构:并入区块生成,全图阶段跳过
 	[HarmonyPatch(typeof(WorldGeneration), "WorldGenerateStructures")]
 	[HarmonyPrefix]
-	static bool WorldGenerateStructures_Prefix()
+	private static bool WorldGenerateStructures_Prefix()
 	{
-		Plugin.Log.LogInfo("CS: WorldGenerateStructures skipped");
+		Plugin.Log.LogInfo((object)"CS: WorldGenerateStructures skipped");
 		return false;
 	}
 
-	// 每帧调度
 	[HarmonyPatch(typeof(WorldGeneration), "Update")]
 	[HarmonyPostfix]
-	static void Update_Postfix()
+	private static void Update_Postfix()
 	{
 		ChunkStreamer.Tick();
 	}
 
-	// 出生点放置:诊断(原版 Physics2D 扫描出生腔)
 	[HarmonyPatch(typeof(Body), "PlaceBody")]
 	[HarmonyPrefix]
-	static bool PlaceBody_Prefix(Body __instance)
+	private static bool PlaceBody_Prefix(Body __instance)
 	{
 		try
 		{
-			Plugin.Log.LogInfo("CS: PlaceBody diag worldNull=" + (WorldGeneration.world == null)
-				+ " biome=" + (WorldGeneration.world != null ? WorldGeneration.world.biomeOverride.ToString() : "?")
-				+ " cam=" + (PlayerCamera.main != null) + " body=" + (PlayerCamera.main != null && PlayerCamera.main.body != null)
-				+ " spawn=" + (GameObject.Find("TUTORIALSPAWN") != null));
+			Plugin.Log.LogInfo("CS: PlaceBody diag worldNull=" + (WorldGeneration.world == null) + " biome=" + ((WorldGeneration.world != null) ? WorldGeneration.world.biomeOverride.ToString() : "?") + " cam=" + (PlayerCamera.main != null) + " body=" + (PlayerCamera.main != null && PlayerCamera.main.body != null) + " spawn=" + (GameObject.Find("TUTORIALSPAWN") != null));
 			if (ChunkStreamer.WB != null)
 			{
-				var sb = new System.Text.StringBuilder("CS: col512 top:");
+				StringBuilder sb = new StringBuilder("CS: col512 top:");
 				for (int y = 512; y > 460; y--)
 				{
 					sb.Append(ChunkStreamer.WB[512, y]).Append(',');
 				}
 				Plugin.Log.LogInfo(sb.ToString());
-				int first = -1, firstAfterAir = -1;
-				bool air = false;
+				int firstSolid = -1;
+				int firstSolidAfterAir = -1;
+				bool sawAir = false;
 				for (int y = 512; y >= 380; y--)
 				{
-					if (ChunkStreamer.WB[512, y] == 0) air = true;
-					else { if (first < 0) first = y; if (air) { firstAfterAir = y; break; } }
+					if (ChunkStreamer.WB[512, y] == 0)
+					{
+						sawAir = true;
+					}
+					else
+					{
+						if (firstSolid < 0)
+						{
+							firstSolid = y;
+						}
+						if (sawAir)
+						{
+							firstSolidAfterAir = y;
+							break;
+						}
+					}
 				}
-				Plugin.Log.LogInfo("CS: col512 firstSolid=" + first + " firstSolidAfterAir=" + firstAfterAir + " (halfHeight=512, depth=" + (512 - firstAfterAir) + "m)");
+				Plugin.Log.LogInfo("CS: col512 firstSolid=" + firstSolid + " firstSolidAfterAir=" + firstSolidAfterAir + " (halfHeight=512, depth=" + (512 - firstSolidAfterAir) + "m)");
 			}
 		}
-		catch (Exception e)
+		catch (Exception ex)
 		{
-			Plugin.Log.LogInfo("CS: PlaceBody diag err " + e.Message);
+			Plugin.Log.LogInfo("CS: PlaceBody diag err " + ex.Message);
 		}
 		return true;
 	}
 
-	// 层过渡/重开世界时清状态
 	[HarmonyPatch(typeof(WorldGeneration), "Clear")]
 	[HarmonyPostfix]
-	static void Clear_Postfix()
+	private static void Clear_Postfix()
 	{
 		ChunkStreamer.OnClear();
 	}
