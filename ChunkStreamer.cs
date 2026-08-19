@@ -82,13 +82,21 @@ public static class ChunkStreamer
 
 	private static bool structPlaced;
 
+	private static readonly List<Vector2Int> mpPlayerChunks = new List<Vector2Int>();
+
+	private static readonly List<Vector2Int> mpLastEnqueued = new List<Vector2Int>();
+
+	private static System.Reflection.FieldInfo f_netBodyAll;
+
+	private static bool mpNetBodyChecked;
+
 	private static readonly System.Random terrainRng = new System.Random(12345);
 
-	public const int GEN_RADIUS = 6;
+	public const int GEN_RADIUS = 3;
 
-	public const int UNLOAD_RADIUS = 6;
+	public const int UNLOAD_RADIUS = 3;
 
-	public const int RENDER_RADIUS = 7;
+	public const int RENDER_RADIUS = 1;
 
 	public const int INIT_RADIUS = 1;
 
@@ -98,9 +106,9 @@ public static class ChunkStreamer
 
 	public static Vector2Int PlayerChunk = new Vector2Int(8, 8);
 
-	private static Vector2Int lastScanChunk = new Vector2Int(int.MinValue, int.MinValue);
+	private static int lastScanKey = int.MinValue;
 
-	private static Vector2Int lastEnqueueChunk = new Vector2Int(int.MinValue, int.MinValue);
+	private static int lastEnqueueKey = int.MinValue;
 
 	private static Vector2Int lastPlayerChunk;
 
@@ -293,11 +301,20 @@ public static class ChunkStreamer
 		Vector2Int val = default(Vector2Int);
 		val = new Vector2Int((int)((long)(W.width / 2u) / (long)CS), (int)((long)(W.height / 2u) / (long)CS));
 		PlayerChunk = val;
-		EnqueueAround(val, 1, genNow: true);
+		for (int i = val.x; i <= val.x + 1; i++)
+		{
+			for (int j = val.y; j <= val.y + 1; j++)
+			{
+				if (i >= 0 && j >= 0 && i <= 15 && j <= 15 && !genData[i, j] && !genApplied[i, j])
+				{
+					SyncGenAndWait(new Vector2Int(i, j));
+				}
+			}
+		}
 		GenSpawnCavity();
 		if (StreamOn)
 		{
-			EnqueueAround(val, 5, genNow: false);
+			EnqueueAround(val, GEN_RADIUS, genNow: false);
 		}
 	}
 
@@ -389,6 +406,49 @@ public static class ChunkStreamer
 		pendingFull.Add(cc);
 	}
 
+	private static void CollectPlayers()
+	{
+		mpPlayerChunks.Clear();
+		try
+		{
+			if (PlayerCamera.main != null && PlayerCamera.main.body != null)
+			{
+				Vector3 val = PlayerCamera.main.body.transform.position;
+				mpPlayerChunks.Add(new Vector2Int(Mathf.Clamp((int)(val.x + 512f) / CS, 0, 15), Mathf.Clamp((int)(val.y + 512f) / CS, 0, 15)));
+			}
+		}
+		catch
+		{
+		}
+		try
+		{
+			if (!mpNetBodyChecked)
+			{
+				mpNetBodyChecked = true;
+				f_netBodyAll = Type.GetType("KrokoshaCasualtiesMP.NetBody, KrokoshaCasualtiesMP")?.GetField("all_instances", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public);
+			}
+			if (f_netBodyAll != null)
+			{
+				System.Collections.IEnumerable list = f_netBodyAll.GetValue(null) as System.Collections.IEnumerable;
+				if (list != null)
+				{
+					foreach (object obj in list)
+					{
+						Component component = obj as Component;
+						if ((Object)(object)component != (Object)null && (Object)(object)component.transform != (Object)null)
+						{
+							Vector3 val2 = component.transform.position;
+							mpPlayerChunks.Add(new Vector2Int(Mathf.Clamp((int)(val2.x + 512f) / CS, 0, 15), Mathf.Clamp((int)(val2.y + 512f) / CS, 0, 15)));
+						}
+					}
+				}
+			}
+		}
+		catch
+		{
+		}
+	}
+
 	public static void Tick()
 	{
 		//IL_0057: Unknown result type (might be due to invalid IL or missing references)
@@ -440,6 +500,7 @@ public static class ChunkStreamer
 		{
 			Time.fixedDeltaTime = 0.03f;
 		}
+		CollectPlayers();
 		Vector2Int pc = PlayerChunk;
 		try
 		{
@@ -457,18 +518,41 @@ public static class ChunkStreamer
 		{
 		}
 		bool flag = false;
-		if (StreamOn && pc != lastEnqueueChunk)
+		if (StreamOn)
 		{
-			lastEnqueueChunk = pc;
-			for (int i = pc.x - GEN_RADIUS; i <= pc.x + GEN_RADIUS; i++)
+			int enqueueKey = 0;
+			foreach (Vector2Int ppc3 in mpPlayerChunks)
 			{
-				for (int j = pc.y - GEN_RADIUS; j <= pc.y + GEN_RADIUS; j++)
+				enqueueKey = enqueueKey * 397 + ppc3.x * 31 + ppc3.y;
+			}
+			if (enqueueKey != lastEnqueueKey)
+			{
+				lastEnqueueKey = enqueueKey;
+				for (int idx = mpLastEnqueued.Count - 1; idx >= 0; idx--)
 				{
-					if (i >= 0 && j >= 0 && i <= 15 && j <= 15 && !genData[i, j] && !inQueue[i, j])
+					if (!mpPlayerChunks.Contains(mpLastEnqueued[idx]))
 					{
-						queue.Add(new Vector2Int(i, j));
-						inQueue[i, j] = true;
-						flag = true;
+						mpLastEnqueued.RemoveAt(idx);
+					}
+				}
+				foreach (Vector2Int ppc in mpPlayerChunks)
+				{
+					if (mpLastEnqueued.Contains(ppc))
+					{
+						continue;
+					}
+					mpLastEnqueued.Add(ppc);
+					for (int i = ppc.x - GEN_RADIUS; i <= ppc.x + GEN_RADIUS; i++)
+					{
+						for (int j = ppc.y - GEN_RADIUS; j <= ppc.y + GEN_RADIUS; j++)
+						{
+							if (i >= 0 && j >= 0 && i <= 15 && j <= 15 && !genData[i, j] && !inQueue[i, j])
+							{
+								queue.Add(new Vector2Int(i, j));
+								inQueue[i, j] = true;
+								flag = true;
+							}
+						}
 					}
 				}
 			}
@@ -508,9 +592,14 @@ public static class ChunkStreamer
 			}
 		}
 		int num3 = 0;
-		if (pc != lastScanChunk)
+		int scanKey = 0;
+		foreach (Vector2Int ppc2 in mpPlayerChunks)
 		{
-			lastScanChunk = pc;
+			scanKey = scanKey * 397 + ppc2.x * 31 + ppc2.y;
+		}
+		if (scanKey != lastScanKey)
+		{
+			lastScanKey = scanKey;
 			for (int m = 0; m < 16; m++)
 			{
 				for (int n = 0; n < 16; n++)
@@ -519,7 +608,15 @@ public static class ChunkStreamer
 					{
 						continue;
 					}
-					bool flag2 = Math.Max(Math.Abs(m - pc.x), Math.Abs(n - pc.y)) > UNLOAD_RADIUS;
+					bool flag2 = true;
+					foreach (Vector2Int ppc in mpPlayerChunks)
+					{
+						if (Math.Max(Math.Abs(m - ppc.x), Math.Abs(n - ppc.y)) <= UNLOAD_RADIUS)
+						{
+							flag2 = false;
+							break;
+						}
+					}
 					if (flag2 != colliderOn[m, n])
 					{
 						continue;
