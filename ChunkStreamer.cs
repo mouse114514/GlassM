@@ -114,8 +114,6 @@ public static class ChunkStreamer
 
 	private static Vector2Int moveDir;
 
-	private static float nextLogTime;
-
 	public static readonly bool StreamOn = true;
 
 	private static readonly string[] Crystals = new string[7] { "BloodCrystal", "SoothingCrystal", "ReliefCrystal", "TurbulentCrystal", "OxygenCrystal", "EmissiveCrystal", "DigestionCrystal" };
@@ -644,65 +642,6 @@ public static class ChunkStreamer
 				}
 			}
 		}
-		if (!(Time.unscaledTime > nextLogTime))
-		{
-			return;
-		}
-		nextLogTime = Time.unscaledTime + 5f;
-		int num5 = 0;
-		for (int num6 = 0; num6 < 16; num6++)
-		{
-			for (int num7 = 0; num7 < 16; num7++)
-			{
-				if (genData[num6, num7])
-				{
-					num5++;
-				}
-			}
-		}
-		string text = "";
-		if (diagApplyCount > 0)
-		{
-			text = $" | apply {(float)diagApplyMs / (float)diagApplyCount:N2}ms (ore {(float)diagOreMs / (float)diagApplyCount:N2} render {(float)diagRenderMs / (float)diagApplyCount:N2} struct {(float)diagStructMs / (float)diagApplyCount:N2} refresh {(float)diagRefreshMs / (float)diagApplyCount:N2}, {diagApplyCount})";
-			diagApplyMs = (diagOreMs = (diagRenderMs = (diagStructMs = (diagRefreshMs = 0L))));
-			diagApplyCount = 0;
-		}
-		int num8 = 0;
-		int num9 = 0;
-		int num10 = 0;
-		if (CH != null)
-		{
-			for (int num11 = 0; num11 < 16; num11++)
-			{
-				for (int num12 = 0; num12 < 16; num12++)
-				{
-					Tilemap val7 = CH[num11, num12];
-					if ((Object)(object)val7 == (Object)null)
-					{
-						continue;
-					}
-					TilemapRenderer component2 = ((Component)val7).GetComponent<TilemapRenderer>();
-					if ((Object)(object)component2 != (Object)null && ((Renderer)component2).enabled)
-					{
-						num8++;
-					}
-					Collider2D[] components2 = ((Component)val7).GetComponents<Collider2D>();
-					foreach (Collider2D val8 in components2)
-					{
-						if (((Behaviour)val8).enabled)
-						{
-							num9++;
-						}
-					}
-					Rigidbody2D component3 = ((Component)val7).GetComponent<Rigidbody2D>();
-					if ((Object)(object)component3 != (Object)null && component3.simulated)
-					{
-						num10++;
-					}
-				}
-			}
-		}
-		Plugin.Log.LogInfo((object)("CS: generated " + num5 + "/256, queue " + queue.Count + ", collider toggles " + num3 + " | rendererOn=" + num8 + " colliders=" + num9 + " rbSim=" + num10 + text));
 	}
 
 	private static int Dist2(Vector2Int a, Vector2Int b)
