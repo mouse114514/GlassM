@@ -414,6 +414,7 @@ public static class ChunkStreamer
 		try
 		{
 			GenChunkTerrainInto(cc, array);
+			ApplyBordersInto(array, cc.x * CS, cc.y * CS);
 		}
 		catch (Exception ex)
 		{
@@ -708,6 +709,41 @@ public static class ChunkStreamer
 		return num3;
 	}
 
+	private static void ApplyBordersInto(ushort[,] wb, int ox, int oy)
+	{
+		int x0 = ox;
+		int x1 = ox + CS;
+		if (x0 < 8)
+		{
+			int right = Math.Min(x1, 8);
+			for (int i = x0; i < right; i++)
+			{
+				for (int j = 0; j < CS; j++)
+				{
+					if (Random.Range(0f, 1f) > (float)i * 0.125f)
+					{
+						wb[i - ox, j] = 14;
+					}
+				}
+			}
+		}
+		int width = (int)W.width;
+		if (x1 > width - 8)
+		{
+			int left = Math.Max(x0, width - 8);
+			for (int k = left; k < x1; k++)
+			{
+				for (int l = 0; l < CS; l++)
+				{
+					if (Random.Range(0f, 1f) > (float)(width - 1 - k) * 0.125f)
+					{
+						wb[k - ox, l] = 14;
+					}
+				}
+			}
+		}
+	}
+
 	private static void GenChunk(Vector2Int c, bool full)
 	{
 		if (genData[c.x, c.y] || genApplied[c.x, c.y])
@@ -721,6 +757,7 @@ public static class ChunkStreamer
 		try
 		{
 			GenChunkTerrainInto(c, array);
+			ApplyBordersInto(array, c.x * CS, c.y * CS);
 		}
 		catch (Exception ex)
 		{
