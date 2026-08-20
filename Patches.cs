@@ -1,6 +1,7 @@
 using System;
 using HarmonyLib;
 using UnityEngine;
+using UnityEngine.Tilemaps;
 
 namespace GlassM;
 
@@ -38,8 +39,15 @@ public static class Patches
 	[HarmonyPrefix]
 	private static bool WorldGenerateStructures_Prefix()
 	{
-		Plugin.Log.LogInfo((object)"CS: WorldGenerateStructures skipped");
-		return false;
+		return true;
+	}
+
+	[HarmonyPatch(typeof(WorldGeneration), "GenerateObjectAtPos")]
+	[HarmonyPostfix]
+	private static void GenerateObjectAtPos_Postfix(Vector2Int pos, Tilemap tilemap)
+	{
+		ChunkStreamer.ProtectObjectArea(pos, tilemap);
+		ChunkStreamer.RefreshChunkAtBlock(pos);
 	}
 
 	[HarmonyPatch(typeof(WorldGeneration), "Update")]

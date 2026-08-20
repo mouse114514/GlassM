@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Reflection;
@@ -130,6 +130,8 @@ public static class ChunkStreamer
 
 	private static Vector2Int spawnCenter;
 
+	private static bool[,] protectedCell;
+
 	public static readonly bool StreamOn = true;
 
 	private static readonly string[] Crystals = new string[7] { "BloodCrystal", "SoothingCrystal", "ReliefCrystal", "TurbulentCrystal", "OxygenCrystal", "EmissiveCrystal", "DigestionCrystal" };
@@ -188,6 +190,8 @@ public static class ChunkStreamer
 		Array.Clear(genApplied, 0, genApplied.Length);
 		Array.Clear(dirtyRender, 0, dirtyRender.Length);
 		queue.Clear();
+		protectedCell = new bool[(int)w.width, (int)w.height];
+		spawnProtected = false;
 	}
 
 	public static void OnClear()
@@ -200,6 +204,8 @@ public static class ChunkStreamer
 		Array.Clear(dirtyRender, 0, dirtyRender.Length);
 		queue.Clear();
 		pendingFull.Clear();
+		protectedCell = null;
+		spawnProtected = false;
 	}
 
 	private static bool InWorld(Vector2Int c)
@@ -843,26 +849,75 @@ public static class ChunkStreamer
 		Plugin.Log.LogInfo((object)("CS: spawn recorded at block " + b.ToString()));
 	}
 
-	private static void ApplySpawnProtect(ushort[,] wb, int ox, int oy)
+	public static void ProtectObjectArea(Vector2Int pos, Tilemap tilemap)
 	{
-		if (!spawnProtected)
+		if (protectedCell == null || (Object)(object)tilemap == (Object)null)
 		{
 			return;
 		}
-		int minX = Mathf.Max(ox, spawnCenter.x - 16);
-		int maxX = Mathf.Min(ox + CS - 1, spawnCenter.x + 16);
-		int minY = Mathf.Max(oy, spawnCenter.y - 16);
-		int maxY = Mathf.Min(oy + CS - 1, spawnCenter.y + 16);
-		if (minX > maxX || minY > maxY)
+		BoundsInt bounds = tilemap.cellBounds;
+		for (int i = bounds.xMin; i < bounds.xMax; i++)
 		{
-			return;
-		}
-		for (int i = minX; i <= maxX; i++)
-		{
-			for (int j = minY; j <= maxY; j++)
+			for (int j = bounds.yMin; j < bounds.yMax; j++)
 			{
-				ushort cur = WB[i, j];
-				wb[i - ox, j - oy] = cur;
+				if (!tilemap.HasTile(new Vector3Int(i, j)))
+				{
+					continue;
+				}
+				int gx = pos.x + i;
+				int gy = pos.y + j;
+				if (gx >= 0 && gy >= 0 && gx < protectedCell.GetLength(0) && gy < protectedCell.GetLength(1))
+				{
+					protectedCell[gx, gy] = true;
+				}
+			}
+		}
+	}
+
+	public static void RefreshChunkAtBlock(Vector2Int blockPos)
+	{
+		int cx = blockPos.x / CS;
+		int cy = blockPos.y / CS;
+		if (InWorld(new Vector2Int(cx, cy)) && genApplied[cx, cy])
+		{
+			RenderChunk(new Vector2Int(cx, cy), true);
+		}
+	}
+
+	private static void ApplyProtected(ushort[,] wb, int ox, int oy)
+	{
+		if (protectedCell != null)
+		{
+			int width = protectedCell.GetLength(0);
+			int height = protectedCell.GetLength(1);
+			for (int i = 0; i < CS; i++)
+			{
+				for (int j = 0; j < CS; j++)
+				{
+					int gx = ox + i;
+					int gy = oy + j;
+					if (gx < width && gy < height && protectedCell[gx, gy])
+					{
+						wb[i, j] = WB[gx, gy];
+					}
+				}
+			}
+		}
+		if (spawnProtected)
+		{
+			int minX = Mathf.Max(ox, spawnCenter.x - 16);
+			int maxX = Mathf.Min(ox + CS - 1, spawnCenter.x + 16);
+			int minY = Mathf.Max(oy, spawnCenter.y - 16);
+			int maxY = Mathf.Min(oy + CS - 1, spawnCenter.y + 16);
+			if (minX <= maxX && minY <= maxY)
+			{
+				for (int i = minX; i <= maxX; i++)
+				{
+					for (int j = minY; j <= maxY; j++)
+					{
+						wb[i - ox, j - oy] = WB[i, j];
+					}
+				}
 			}
 		}
 	}
@@ -1465,7 +1520,7 @@ public static class ChunkStreamer
 					wb[i - num, j - num2] = num3;
 				}
 			}
-			ApplySpawnProtect(wb, num, num2);
+			ApplyProtected(wb, num, num2);
 			return;
 		}
 		if (biome == 2 || biome == 3)
@@ -1511,7 +1566,7 @@ public static class ChunkStreamer
 					}
 				}
 			}
-			ApplySpawnProtect(wb, num, num2);
+			ApplyProtected(wb, num, num2);
 			return;
 		}
 		float num7 = float.NaN;
@@ -1534,7 +1589,7 @@ public static class ChunkStreamer
 				wb[m - num, n - num2] = num10;
 			}
 		}
-		ApplySpawnProtect(wb, num, num2);
+		ApplyProtected(wb, num, num2);
 	}
 
 	private static void GenChunkOres(Vector2Int c)
