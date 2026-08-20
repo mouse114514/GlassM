@@ -2006,8 +2006,9 @@ public static class ChunkStreamer
 			D(c, "rag", 0.12f * lootRarityMultiplier * ((biome == 2) ? 1f : 2.5f), 0.2f * lootRarityMultiplier * ((biome == 2) ? 1f : 2.5f), 1f);
 			D(c, "corpse", 0.75f * lootRarityMultiplier * ((biome == 2) ? 1f : 2f), 0.82f * lootRarityMultiplier * ((biome == 2) ? 1f : 2f), 0f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
 			DistributeLoose(c, "oilpipe", 0.3f, 0.4f, false, Vector2.down, true, false);
-			DistributeLoose(c, "turret", 0.12f * totalTrapRarity * ((biome == 2) ? 1f : 0.66f), 0.15f * totalTrapRarity * ((biome == 2) ? 1f : 0.66f), true, (Random.value > 0.5f) ? Vector2.right : Vector2.left, false, false);
-			DistributeLoose(c, "stalactite", 1.5f * totalTrapRarity, 2f * totalTrapRarity, true, Vector2.up, false, false);
+			PlaceTurret(c, 0.12f * totalTrapRarity * ((biome == 2) ? 1f : 0.66f), 0.15f * totalTrapRarity * ((biome == 2) ? 1f : 0.66f));
+			PlaceStalactite(c, 1.5f * totalTrapRarity, 2f * totalTrapRarity);
+			PlaceSandvine(c, 6f * ((biome == 2) ? 1f : 0.1f), 7f * ((biome == 2) ? 1f : 0.1f));
 			Diag.Log("[CE] done b23 c=(" + c.x + "," + c.y + ") placed=" + diagEntityCount);
 			diagEntityCount = 0;
 			return;
@@ -2043,12 +2044,13 @@ public static class ChunkStreamer
 		D(c, "grabberplant", 0.4f * totalTrapRarity, 0.5f * totalTrapRarity);
 		D(c, "geyser", 0.7f, 0.8f, 0.6f, 0f, 0f, inGround: false, flip: false, SoftCheck);
 		D(c, "skullcrusher", 1.1f, 1.2f, 1f, 10f, 0f, inGround: false, flip: true, null, Vector2.up);
+		PlaceSandvine(c, 4f, 5f);
 		DistributeLoose(c, "wallflower", 6f, 7f, false, Vector2.down, true, false);
 		Diag.Log("[CE] done bX c=(" + c.x + "," + c.y + ") placed=" + diagEntityCount);
 		diagEntityCount = 0;
 	}
 
-	private static bool FindSurface(int wx, int wy, Vector2 dir, out int hx, out int hy)
+	private static bool FindSurface(int wx, int wy, Vector2 dir, out int hx, out int hy, int maxDist = 16)
 	{
 		//IL_0008: Unknown result type (might be due to invalid IL or missing references)
 		//IL_0015: Unknown result type (might be due to invalid IL or missing references)
@@ -2056,7 +2058,7 @@ public static class ChunkStreamer
 		hy = wy;
 		int num = (int)Mathf.Sign(dir.x);
 		int num2 = (int)Mathf.Sign(dir.y);
-		for (int i = 0; i < 16; i++)
+		for (int i = 0; i < maxDist; i++)
 		{
 			int num3 = wx + num * i;
 			int num4 = wy + num2 * i;
@@ -2153,6 +2155,142 @@ public static class ChunkStreamer
 					item.condition = Random.Range(1, 4) * 0.33f;
 				}
 			}
+		}
+	}
+
+	private static int RandCount(float min, float max)
+	{
+		float num = Random.Range(min, max);
+		int num2 = (int)num;
+		if (Random.value < num - (float)num2)
+		{
+			num2++;
+		}
+		return num2;
+	}
+
+	private static void PlaceTurret(Vector2Int c, float min, float max)
+	{
+		int num = RandCount(min, max);
+		for (int i = 0; i < num; i++)
+		{
+			int num5 = c.x * CS + Random.Range(0, CS);
+			int num6 = c.y * CS + Random.Range(0, CS);
+			if (WB[num5, num6] > 0)
+			{
+				continue;
+			}
+			float num4 = (Random.value > 0.5f) ? 1f : (-1f);
+			int hx;
+			int hy;
+			if (!FindSurface(num5, num6, Vector2.right * num4, out hx, out hy, 32))
+			{
+				continue;
+			}
+			GameObject structObj = GetStructObj("turret");
+			if ((Object)(object)structObj == (Object)null)
+			{
+				Diag.Log("[CE] null-res turret");
+				continue;
+			}
+			Vector2 place = W.BlockToWorldPos(new Vector2Int(hx - (int)num4, hy));
+			GameObject val2 = Object.Instantiate<GameObject>(structObj, (Vector2)(place), Quaternion.identity);
+			val2.transform.localScale = new Vector2(0f - num4, 1f);
+			diagEntityCount++;
+		}
+	}
+
+	private static void PlaceStalactite(Vector2Int c, float min, float max)
+	{
+		int num = RandCount(min, max);
+		for (int i = 0; i < num; i++)
+		{
+			int num5 = c.x * CS + Random.Range(0, CS);
+			int num6 = c.y * CS + Random.Range(0, CS);
+			if (WB[num5, num6] > 0)
+			{
+				continue;
+			}
+			int hx;
+			int hy;
+			if (!FindSurface(num5, num6, Vector2.up, out hx, out hy, 64))
+			{
+				continue;
+			}
+			if ((float)(hy - (int)W.halfHeight) > (float)((int)W.halfHeight) - 5f)
+			{
+				continue;
+			}
+			GameObject structObj = GetStructObj("stalactite");
+			if ((Object)(object)structObj == (Object)null)
+			{
+				Diag.Log("[CE] null-res stalactite");
+				continue;
+			}
+			Vector2 top = W.BlockToWorldPos(new Vector2Int(hx, hy));
+			GameObject val2 = Object.Instantiate<GameObject>(structObj, (Vector2)(top + Vector2.down * 2f), Quaternion.identity);
+			val2.GetComponent<BuildingEntity>().blockPlacedOn = new Vector2Int(hx, hy);
+			if (W.ChunkUpdated[c.x, c.y] != null)
+			{
+				W.ChunkUpdated[c.x, c.y].AddListener(new UnityAction(val2.GetComponent<StalactiteDropper>().CheckSeating));
+			}
+			val2.transform.localScale = new Vector3((Random.Range(0f, 1f) > 0.5f) ? (-1f) : 1f, 1f, 1f);
+			diagEntityCount++;
+		}
+	}
+
+	private static void PlaceSandvine(Vector2Int c, float min, float max)
+	{
+		int num = RandCount(min, max);
+		for (int i = 0; i < num; i++)
+		{
+			int num5 = c.x * CS + Random.Range(0, CS);
+			int num6 = c.y * CS + Random.Range(0, CS);
+			if (WB[num5, num6] > 0)
+			{
+				continue;
+			}
+			int hx1;
+			int hy1;
+			if (!FindSurface(num5, num6, Vector2.up, out hx1, out hy1, 128))
+			{
+				continue;
+			}
+			int hx2;
+			int hy2;
+			if (!FindSurface(num5, num6, Vector2.down, out hx2, out hy2, 128))
+			{
+				continue;
+			}
+			if ((float)(hy2 - (int)W.halfHeight + 1) > (float)((int)W.halfHeight) - 5f)
+			{
+				continue;
+			}
+			GameObject structObj = GetStructObj("Special/sandvinehook");
+			GameObject structObj2 = GetStructObj("Special/sandvinerope");
+			if ((Object)(object)structObj == (Object)null || (Object)(object)structObj2 == (Object)null)
+			{
+				Diag.Log("[CE] null-res sandvine");
+				continue;
+			}
+			Vector2 top = W.BlockToWorldPos(new Vector2Int(hx1, hy1));
+			Vector2 bottom = new Vector2((float)hx2 + 0.5f, (float)(hy2 - (int)W.halfHeight + 1));
+			Color color = Color.Lerp(Color.gray, Color.white, Random.value);
+			GameObject gameObject3 = Object.Instantiate<GameObject>(structObj, (Vector2)(top), Quaternion.identity);
+			GameObject obj = Object.Instantiate<GameObject>(structObj2, (Vector2)((top + bottom) * 0.5f), Quaternion.identity);
+			obj.GetComponent<SpriteRenderer>().size = new Vector2(2.5f, Mathf.Abs(top.y - bottom.y));
+			obj.GetComponent<SpriteRenderer>().color = color;
+			gameObject3.GetComponent<SpriteRenderer>().color = color;
+			obj.GetComponent<SpriteRenderer>().flipX = Random.value > 0.5f;
+			gameObject3.GetComponent<SpriteRenderer>().flipX = Random.value > 0.5f;
+			float num7 = Random.Range(0.15f, 1f);
+			gameObject3.transform.localScale = new Vector3(num7, 1f);
+			obj.transform.localScale = new Vector3(num7, 1f);
+			Climbable component2 = obj.GetComponent<Climbable>();
+			component2.points.Add(bottom);
+			component2.points.Add(top);
+			component2.downwardsVelocity = (1f - num7) * 16f;
+			diagEntityCount++;
 		}
 	}
 
