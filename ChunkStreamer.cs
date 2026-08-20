@@ -132,8 +132,6 @@ public static class ChunkStreamer
 
 	private const int SpawnProtectHalfW = 6;
 
-	private const int SpawnProtectTop = 16;
-
 	public static readonly bool StreamOn = true;
 
 	private static readonly string[] Crystals = new string[7] { "BloodCrystal", "SoothingCrystal", "ReliefCrystal", "TurbulentCrystal", "OxygenCrystal", "EmissiveCrystal", "DigestionCrystal" };
@@ -835,28 +833,7 @@ public static class ChunkStreamer
 		Vector2Int b = W.WorldToBlockPos(((Component)body).transform.position);
 		spawnProtected = true;
 		spawnCenter = b;
-		int minX = Mathf.Max(0, b.x - SpawnProtectHalfW);
-		int maxX = Mathf.Min((int)W.width - 1, b.x + SpawnProtectHalfW);
-		int minY = Mathf.Max(0, b.y);
-		int maxY = Mathf.Min((int)W.height - 1, b.y + SpawnProtectTop);
-		for (int i = minX; i <= maxX; i++)
-		{
-			for (int j = minY; j <= maxY; j++)
-			{
-				WB[i, j] = 0;
-			}
-		}
-		for (int cx = minX / CS - 1; cx <= maxX / CS + 1; cx++)
-		{
-			for (int cy = minY / CS - 1; cy <= maxY / CS + 1; cy++)
-			{
-				if (cx >= 0 && cy >= 0 && cx < 16 && cy < 16 && genApplied[cx, cy])
-				{
-					RenderChunk(new Vector2Int(cx, cy), true);
-				}
-			}
-		}
-		Plugin.Log.LogInfo((object)("CS: spawn protected at block " + b.ToString()));
+		Plugin.Log.LogInfo((object)("CS: spawn recorded at block " + b.ToString()));
 	}
 
 	private static void ApplySpawnProtect(ushort[,] wb, int ox, int oy)
@@ -868,7 +845,7 @@ public static class ChunkStreamer
 		int minX = Mathf.Max(ox, spawnCenter.x - SpawnProtectHalfW);
 		int maxX = Mathf.Min(ox + CS - 1, spawnCenter.x + SpawnProtectHalfW);
 		int minY = Mathf.Max(oy, spawnCenter.y);
-		int maxY = Mathf.Min(oy + CS - 1, spawnCenter.y + SpawnProtectTop);
+		int maxY = Mathf.Min(oy + CS - 1, spawnCenter.y + 2);
 		if (minX > maxX || minY > maxY)
 		{
 			return;
