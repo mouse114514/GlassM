@@ -122,6 +122,10 @@ public static class ChunkStreamer
 
 	private static float diagLastLogTime;
 
+	private static readonly string DiagLogPath = System.IO.Path.Combine("BepInEx", "plugins", "GlassM-diag.log");
+
+	private static readonly List<string> diagBuffer = new List<string>();
+
 	public static readonly bool StreamOn = true;
 
 	private static readonly string[] Crystals = new string[7] { "BloodCrystal", "SoothingCrystal", "ReliefCrystal", "TurbulentCrystal", "OxygenCrystal", "EmissiveCrystal", "DigestionCrystal" };
@@ -655,10 +659,23 @@ public static class ChunkStreamer
 					}
 				}
 			}
-			Plugin.Log.LogInfo(string.Concat(new object[]
+			string diagLine = string.Concat(new object[]
 			{
 				"[CSDIAG] ticks=", diagTickCount, " plrs=", mpPlayerChunks.Count, " pc=", pc, " q=", queue.Count, " pf=", pendingFull.Count, " gen=", diagGenCount, " ren=", diagRenderCount, " fix=", diagRenderFixed, " dirty=", dirtyTotal, " colFlip=", num3, " ore=", diagOreMs, "ms ren=", diagRenderMs, "ms struct=", diagStructMs, "ms refresh=", diagRefreshMs, "ms apply=", diagApplyMs, "ms"
-			}));
+			});
+			Plugin.Log.LogInfo(diagLine);
+			diagBuffer.Add(diagLine);
+			while (diagBuffer.Count > 300)
+			{
+				diagBuffer.RemoveAt(0);
+			}
+			try
+			{
+				System.IO.File.AppendAllText(DiagLogPath, diagLine + Environment.NewLine);
+			}
+			catch
+			{
+			}
 			diagTickCount = 0;
 			diagGenCount = 0;
 			diagRenderCount = 0;
@@ -671,6 +688,17 @@ public static class ChunkStreamer
 			diagApplyCount = 0;
 		}
 	}
+
+	public static string BuildDiagText()
+	{
+		if (diagBuffer.Count == 0)
+		{
+			return "(no CSDIAG lines yet)";
+		}
+		return string.Join(Environment.NewLine, diagBuffer);
+	}
+
+	public static int DiagBufferCount => diagBuffer.Count;
 
 	private static int Dist2(Vector2Int a, Vector2Int b)
 	{

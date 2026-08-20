@@ -40,5 +40,11 @@
     <Reference Include="UnityEngine.AudioModule">
       <HintPath>C:\Users\Administrator\Desktop\work\Cu-SaveManager-main\references\UnityEngine.AudioModule.dll</HintPath>
     </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>C:\Users\Administrator\Desktop\work\Cu-SaveManager-main\references\UnityEngine.InputLegacyModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>C:\Users\Administrator\Desktop\work\Cu-SaveManager-main\references\UnityEngine.IMGUIModule.dll</HintPath>
+    </Reference>
   </ItemGroup>
 </Project>

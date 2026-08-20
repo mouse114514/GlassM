@@ -3,6 +3,7 @@ using System.Reflection;
 using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
+using UnityEngine;
 
 namespace GlassM;
 
@@ -10,6 +11,40 @@ namespace GlassM;
 public sealed class Plugin : BaseUnityPlugin
 {
 	internal static ManualLogSource Log;
+
+	internal static string ScreenToast;
+
+	private float toastUntil;
+
+	private void Update()
+	{
+		if (Input.GetKeyDown(KeyCode.B))
+		{
+			string text = ChunkStreamer.BuildDiagText();
+			try
+			{
+				GUIUtility.systemCopyBuffer = text;
+			}
+			catch
+			{
+			}
+			ScreenToast = "CSDIAG copied to clipboard: " + ChunkStreamer.DiagBufferCount + " lines, " + text.Length + " chars";
+			toastUntil = Time.realtimeSinceStartup + 6f;
+		}
+	}
+
+	private void OnGUI()
+	{
+		if (ScreenToast != null && Time.realtimeSinceStartup < toastUntil)
+		{
+			GUIStyle val = new GUIStyle(GUI.skin.label);
+			val.fontSize = 16;
+			val.normal.textColor = Color.white;
+			val.wordWrap = true;
+			GUI.Box(new Rect(12f, 12f, 520f, 70f), "");
+			GUI.Label(new Rect(20f, 16f, 504f, 62f), ScreenToast, val);
+		}
+	}
 
 	private void Awake()
 	{
