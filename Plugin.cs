@@ -44,6 +44,7 @@ public sealed class Plugin : BaseUnityPlugin
 			Patch(harmony, typeof(WorldGeneration), "Update", "Update_Postfix", prefix: false);
 			Patch(harmony, typeof(WorldGeneration), "Clear", "Clear_Postfix", prefix: false);
 			Patch(harmony, typeof(WorldGeneration), "GenerateObjectAtPos", "GenerateObjectAtPos_Postfix", prefix: false);
+			Patch(harmony, typeof(ConsoleScript), "RegisterAllCommands", "RegisterAllCommands_Postfix", prefix: false);
 			Logger.LogInfo((object)"GlassM: patches applied");
 		}
 		catch (Exception ex)

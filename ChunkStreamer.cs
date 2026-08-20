@@ -714,8 +714,20 @@ public static class ChunkStreamer
 
 	private static readonly MethodInfo m_logToConsole = typeof(ConsoleScript).GetMethod("LogToConsole", BindingFlags.Instance | BindingFlags.NonPublic);
 
-	public static void LogToGameConsole(string text)
+	public static bool GameConsoleLogEnabled = true;
+
+	public static void ToggleGameConsoleLog()
 	{
+		GameConsoleLogEnabled = !GameConsoleLogEnabled;
+		LogToGameConsole("GlassM console logging " + (GameConsoleLogEnabled ? "ON" : "OFF"), true);
+	}
+
+	public static void LogToGameConsole(string text, bool force = false)
+	{
+		if (!force && !GameConsoleLogEnabled)
+		{
+			return;
+		}
 		try
 		{
 			ConsoleScript instance = ConsoleScript.instance;

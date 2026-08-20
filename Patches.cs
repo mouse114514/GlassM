@@ -50,6 +50,16 @@ public static class Patches
 		ChunkStreamer.RefreshChunkAtBlock(pos);
 	}
 
+	[HarmonyPatch(typeof(ConsoleScript), "RegisterAllCommands")]
+	[HarmonyPostfix]
+	private static void RegisterAllCommands_Postfix()
+	{
+		ConsoleScript.Commands.Add(new Command("glassmlog", "Toggles GlassM CSDIAG console output.", delegate
+		{
+			ChunkStreamer.ToggleGameConsoleLog();
+		}, null, null));
+	}
+
 	[HarmonyPatch(typeof(WorldGeneration), "Update")]
 	[HarmonyPostfix]
 	private static void Update_Postfix()
