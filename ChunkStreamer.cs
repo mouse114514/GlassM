@@ -675,6 +675,7 @@ public static class ChunkStreamer
 				"[CSDIAG] ticks=", diagTickCount, " plrs=", mpPlayerChunks.Count, " pc=", pc, " q=", queue.Count, " pf=", pendingFull.Count, " gen=", diagGenCount, " ren=", diagRenderCount, " fix=", diagRenderFixed, " dirty=", dirtyTotal, " colFlip=", num3, " ore=", diagOreMs, "ms ren=", diagRenderMs, "ms struct=", diagStructMs, "ms refresh=", diagRefreshMs, "ms apply=", diagApplyMs, "ms"
 			});
 			Plugin.Log.LogInfo(diagLine);
+			LogToGameConsole(diagLine);
 			diagBuffer.Add(diagLine);
 			while (diagBuffer.Count > 300)
 			{
@@ -710,6 +711,23 @@ public static class ChunkStreamer
 	}
 
 	public static int DiagBufferCount => diagBuffer.Count;
+
+	private static readonly MethodInfo m_logToConsole = typeof(ConsoleScript).GetMethod("LogToConsole", BindingFlags.Instance | BindingFlags.NonPublic);
+
+	public static void LogToGameConsole(string text)
+	{
+		try
+		{
+			ConsoleScript instance = ConsoleScript.instance;
+			if ((Object)(object)instance != (Object)null && m_logToConsole != null)
+			{
+				m_logToConsole.Invoke(instance, new object[1] { text });
+			}
+		}
+		catch
+		{
+		}
+	}
 
 	public static string[] LastDiagLines(int count)
 	{
