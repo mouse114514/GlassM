@@ -2127,6 +2127,9 @@ public static class ChunkStreamer
 				{
 					continue;
 				}
+				Vector2Int place = new Vector2Int(hx - (int)Mathf.Sign(dir.x), hy - (int)Mathf.Sign(dir.y));
+				hx = place.x;
+				hy = place.y;
 			}
 			else
 			{
@@ -2139,7 +2142,7 @@ public static class ChunkStreamer
 				Diag.Log("[CE] null-res " + name);
 				continue;
 			}
-			Vector2 vector = W.BlockToWorldPos(new Vector2Int(hx, hy + 1));
+			Vector2 vector = W.BlockToWorldPos(new Vector2Int(hx, hy));
 			GameObject val2 = Object.Instantiate<GameObject>(structObj, (Vector2)(vector), Quaternion.Euler(0f, 0f, rotate ? Random.Range(-180f, 180f) : 0f));
 			diagEntityCount++;
 			if (setCondition)
@@ -2186,7 +2189,8 @@ public static class ChunkStreamer
 		{
 			int num5 = num3 + Random.Range(0, CS);
 			int num6 = num4 + Random.Range(0, CS);
-			if (WB[num5, num6] > 0 || !FindSurface(num5, num6, (dir == default(Vector2)) ? Vector2.down : dir, out var hx, out var hy) || (check != null && !check(hx, hy)))
+			Vector2 val2 = (dir == default(Vector2)) ? Vector2.down : dir;
+			if (WB[num5, num6] > 0 || !FindSurface(num5, num6, val2, out var hx, out var hy) || (check != null && !check(hx, hy)))
 			{
 				continue;
 			}
@@ -2196,11 +2200,12 @@ public static class ChunkStreamer
 				Diag.Log("[CE] null-res " + name);
 				continue;
 			}
-			val = W.BlockToWorldPos(new Vector2Int(hx, hy + 1));
+			Vector2Int place = new Vector2Int(hx - (int)Mathf.Sign(val2.x), hy - (int)Mathf.Sign(val2.y));
+			val = W.BlockToWorldPos(place);
 			float num7 = Random.Range(yOff - yDev, yOff + yDev);
-			GameObject val2 = Object.Instantiate<GameObject>(structObj, (Vector2)(val - dir * num7), Quaternion.Euler(0f, 0f, Random.Range(0f - rot, rot)));
+			GameObject val3 = Object.Instantiate<GameObject>(structObj, (Vector2)(val - val2 * num7), Quaternion.Euler(0f, 0f, Random.Range(0f - rot, rot)));
 			diagEntityCount++;
-			BuildingEntity component = val2.GetComponent<BuildingEntity>();
+			BuildingEntity component = val3.GetComponent<BuildingEntity>();
 			if ((Object)(object)component != (Object)null)
 			{
 				component.blockPlacedOn = new Vector2Int(hx, hy);
@@ -2211,9 +2216,9 @@ public static class ChunkStreamer
 			}
 			if (flip && Random.value < 0.5f)
 			{
-				Vector3 localScale = val2.transform.localScale;
+				Vector3 localScale = val3.transform.localScale;
 				localScale.x *= -1f;
-				val2.transform.localScale = localScale;
+				val3.transform.localScale = localScale;
 			}
 		}
 	}
