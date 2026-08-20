@@ -130,6 +130,10 @@ public static class ChunkStreamer
 
 	private static Vector2Int spawnCenter;
 
+	private const int SpawnProtectHalfW = 6;
+
+	private const int SpawnProtectTop = 16;
+
 	public static readonly bool StreamOn = true;
 
 	private static readonly string[] Crystals = new string[7] { "BloodCrystal", "SoothingCrystal", "ReliefCrystal", "TurbulentCrystal", "OxygenCrystal", "EmissiveCrystal", "DigestionCrystal" };
@@ -831,10 +835,10 @@ public static class ChunkStreamer
 		Vector2Int b = W.WorldToBlockPos(((Component)body).transform.position);
 		spawnProtected = true;
 		spawnCenter = b;
-		int minX = Mathf.Max(0, b.x - 30);
-		int maxX = Mathf.Min((int)W.width - 1, b.x + 30);
-		int minY = Mathf.Max(0, b.y - 30);
-		int maxY = Mathf.Min((int)W.height - 1, b.y + 30);
+		int minX = Mathf.Max(0, b.x - SpawnProtectHalfW);
+		int maxX = Mathf.Min((int)W.width - 1, b.x + SpawnProtectHalfW);
+		int minY = Mathf.Max(0, b.y);
+		int maxY = Mathf.Min((int)W.height - 1, b.y + SpawnProtectTop);
 		for (int i = minX; i <= maxX; i++)
 		{
 			for (int j = minY; j <= maxY; j++)
@@ -861,10 +865,10 @@ public static class ChunkStreamer
 		{
 			return;
 		}
-		int minX = Mathf.Max(ox, spawnCenter.x - 30);
-		int maxX = Mathf.Min(ox + CS - 1, spawnCenter.x + 30);
-		int minY = Mathf.Max(oy, spawnCenter.y - 30);
-		int maxY = Mathf.Min(oy + CS - 1, spawnCenter.y + 30);
+		int minX = Mathf.Max(ox, spawnCenter.x - SpawnProtectHalfW);
+		int maxX = Mathf.Min(ox + CS - 1, spawnCenter.x + SpawnProtectHalfW);
+		int minY = Mathf.Max(oy, spawnCenter.y);
+		int maxY = Mathf.Min(oy + CS - 1, spawnCenter.y + SpawnProtectTop);
 		if (minX > maxX || minY > maxY)
 		{
 			return;
