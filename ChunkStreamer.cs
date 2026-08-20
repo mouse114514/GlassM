@@ -2139,7 +2139,7 @@ public static class ChunkStreamer
 				Diag.Log("[CE] null-res " + name);
 				continue;
 			}
-			Vector2 vector = new Vector2((float)hx + 0.5f, (float)hy + 1f);
+			Vector2 vector = W.BlockToWorldPos(new Vector2Int(hx, hy + 1));
 			GameObject val2 = Object.Instantiate<GameObject>(structObj, (Vector2)(vector), Quaternion.Euler(0f, 0f, rotate ? Random.Range(-180f, 180f) : 0f));
 			diagEntityCount++;
 			if (setCondition)
@@ -2196,7 +2196,7 @@ public static class ChunkStreamer
 				Diag.Log("[CE] null-res " + name);
 				continue;
 			}
-			val = new Vector2((float)hx + 0.5f, (float)hy + 1f);
+			val = W.BlockToWorldPos(new Vector2Int(hx, hy + 1));
 			float num7 = Random.Range(yOff - yDev, yOff + yDev);
 			GameObject val2 = Object.Instantiate<GameObject>(structObj, (Vector2)(val - dir * num7), Quaternion.Euler(0f, 0f, Random.Range(0f - rot, rot)));
 			diagEntityCount++;
