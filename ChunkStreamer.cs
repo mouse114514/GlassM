@@ -126,6 +126,10 @@ public static class ChunkStreamer
 
 	private static readonly List<string> diagBuffer = new List<string>();
 
+	private static bool spawnProtected;
+
+	private static Vector2Int spawnCenter;
+
 	public static readonly bool StreamOn = true;
 
 	private static readonly string[] Crystals = new string[7] { "BloodCrystal", "SoothingCrystal", "ReliefCrystal", "TurbulentCrystal", "OxygenCrystal", "EmissiveCrystal", "DigestionCrystal" };
@@ -511,6 +515,7 @@ public static class ChunkStreamer
 			Time.fixedDeltaTime = 0.03f;
 		}
 		CollectPlayers();
+		TryProtectSpawn();
 		Vector2Int pc = PlayerChunk;
 		try
 		{
@@ -809,6 +814,67 @@ public static class ChunkStreamer
 			log.LogWarning((object)("chunk apply failed " + val.ToString() + ": " + ex));
 			genApplied[c.x, c.y] = false;
 			genData[c.x, c.y] = false;
+		}
+	}
+
+	private static void TryProtectSpawn()
+	{
+		if (spawnProtected || !Active || W == null || W.generatingWorld)
+		{
+			return;
+		}
+		Body body = (PlayerCamera.main != null) ? PlayerCamera.main.body : null;
+		if ((Object)(object)body == (Object)null)
+		{
+			return;
+		}
+		Vector2Int b = W.WorldToBlockPos(((Component)body).transform.position);
+		spawnProtected = true;
+		spawnCenter = b;
+		int minX = Mathf.Max(0, b.x - 30);
+		int maxX = Mathf.Min((int)W.width - 1, b.x + 30);
+		int minY = Mathf.Max(0, b.y - 30);
+		int maxY = Mathf.Min((int)W.height - 1, b.y + 30);
+		for (int i = minX; i <= maxX; i++)
+		{
+			for (int j = minY; j <= maxY; j++)
+			{
+				WB[i, j] = 0;
+			}
+		}
+		for (int cx = minX / CS - 1; cx <= maxX / CS + 1; cx++)
+		{
+			for (int cy = minY / CS - 1; cy <= maxY / CS + 1; cy++)
+			{
+				if (cx >= 0 && cy >= 0 && cx < 16 && cy < 16 && genApplied[cx, cy])
+				{
+					RenderChunk(new Vector2Int(cx, cy), true);
+				}
+			}
+		}
+		Plugin.Log.LogInfo((object)("CS: spawn protected at block " + b.ToString()));
+	}
+
+	private static void ApplySpawnProtect(ushort[,] wb, int ox, int oy)
+	{
+		if (!spawnProtected)
+		{
+			return;
+		}
+		int minX = Mathf.Max(ox, spawnCenter.x - 30);
+		int maxX = Mathf.Min(ox + CS - 1, spawnCenter.x + 30);
+		int minY = Mathf.Max(oy, spawnCenter.y - 30);
+		int maxY = Mathf.Min(oy + CS - 1, spawnCenter.y + 30);
+		if (minX > maxX || minY > maxY)
+		{
+			return;
+		}
+		for (int i = minX; i <= maxX; i++)
+		{
+			for (int j = minY; j <= maxY; j++)
+			{
+				wb[i - ox, j - oy] = 0;
+			}
 		}
 	}
 
@@ -1410,6 +1476,7 @@ public static class ChunkStreamer
 					wb[i - num, j - num2] = num3;
 				}
 			}
+			ApplySpawnProtect(wb, num, num2);
 			return;
 		}
 		if (biome == 2 || biome == 3)
@@ -1455,6 +1522,7 @@ public static class ChunkStreamer
 					}
 				}
 			}
+			ApplySpawnProtect(wb, num, num2);
 			return;
 		}
 		float num7 = float.NaN;
@@ -1477,6 +1545,7 @@ public static class ChunkStreamer
 				wb[m - num, n - num2] = num10;
 			}
 		}
+		ApplySpawnProtect(wb, num, num2);
 	}
 
 	private static void GenChunkOres(Vector2Int c)
