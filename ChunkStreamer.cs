@@ -80,6 +80,8 @@ public static class ChunkStreamer
 
 	private static int diagApplyCount;
 
+	private static int diagEntityCount;
+
 	private static bool structPlaced;
 
 	private static readonly List<Vector2Int> mpPlayerChunks = new List<Vector2Int>();
@@ -419,7 +421,6 @@ public static class ChunkStreamer
 			return;
 		}
 		ApplyChunk(cc, array);
-		pendingFull.Add(cc);
 	}
 
 	private static void CollectPlayers()
@@ -1715,6 +1716,7 @@ public static class ChunkStreamer
 
 	private static void GenChunkEntities(Vector2Int c)
 	{
+		Diag.Log("[CE] start c=(" + c.x + "," + c.y + ") biome=" + biome);
 		//IL_0039: Unknown result type (might be due to invalid IL or missing references)
 		//IL_006b: Unknown result type (might be due to invalid IL or missing references)
 		//IL_0071: Unknown result type (might be due to invalid IL or missing references)
@@ -2038,6 +2040,8 @@ public static class ChunkStreamer
 		D(c, "geyser", 0.7f, 0.8f, 0.6f, 0f, 0f, inGround: false, flip: false, SoftCheck);
 		D(c, "skullcrusher", 1.1f, 1.2f, 1f, 10f, 0f, inGround: false, flip: true, null, Vector2.up);
 		DistributeLoose(c, "wallflower", 6f, 7f, false, Vector2.down, true, false);
+		Diag.Log("[CE] done c=(" + c.x + "," + c.y + ") placed=" + diagEntityCount);
+		diagEntityCount = 0;
 	}
 
 	private static bool FindSurface(int wx, int wy, Vector2 dir, out int hx, out int hy)
@@ -2088,7 +2092,7 @@ public static class ChunkStreamer
 
 	private static bool CorpseCheck(int bx, int by)
 	{
-		return WB[bx, by] > 0 && WB[bx - 1, by] > 0 && WB[bx + 1, by] > 0;
+		return bx > 0 && bx < W.width - 1 && WB[bx, by] > 0 && WB[bx - 1, by] > 0 && WB[bx + 1, by] > 0;
 	}
 
 	private static bool IsSoil(int bx, int by)
@@ -2132,6 +2136,7 @@ public static class ChunkStreamer
 			}
 			Vector2 vector = new Vector2((float)hx + 0.5f, (float)hy + 1f);
 			GameObject val2 = Object.Instantiate<GameObject>(structObj, (Vector2)(vector), Quaternion.Euler(0f, 0f, rotate ? Random.Range(-180f, 180f) : 0f));
+			diagEntityCount++;
 			if (setCondition)
 			{
 				Item item = val2.GetComponent<Item>();
@@ -2188,6 +2193,7 @@ public static class ChunkStreamer
 			val = new Vector2((float)hx + 0.5f, (float)hy + 1f);
 			float num7 = Random.Range(yOff - yDev, yOff + yDev);
 			GameObject val2 = Object.Instantiate<GameObject>(structObj, (Vector2)(val - dir * num7), Quaternion.Euler(0f, 0f, Random.Range(0f - rot, rot)));
+			diagEntityCount++;
 			BuildingEntity component = val2.GetComponent<BuildingEntity>();
 			if ((Object)(object)component != (Object)null)
 			{
