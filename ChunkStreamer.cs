@@ -711,6 +711,16 @@ public static class ChunkStreamer
 
 	public static int DiagBufferCount => diagBuffer.Count;
 
+	public static string[] LastDiagLines(int count)
+	{
+		if (diagBuffer.Count == 0)
+		{
+			return new string[0];
+		}
+		int n = Math.Min(count, diagBuffer.Count);
+		return diagBuffer.GetRange(diagBuffer.Count - n, n).ToArray();
+	}
+
 	private static int Dist2(Vector2Int a, Vector2Int b)
 	{
 		int num = a.x - b.x;

@@ -16,6 +16,8 @@ public sealed class Plugin : BaseUnityPlugin
 
 	private float toastUntil;
 
+	private bool showDiag = true;
+
 	private void Update()
 	{
 		if (Input.GetKeyDown(KeyCode.B))
@@ -31,6 +33,12 @@ public sealed class Plugin : BaseUnityPlugin
 			ScreenToast = "CSDIAG copied to clipboard: " + ChunkStreamer.DiagBufferCount + " lines, " + text.Length + " chars";
 			toastUntil = Time.realtimeSinceStartup + 6f;
 		}
+		if (Input.GetKeyDown(KeyCode.F3))
+		{
+			showDiag = !showDiag;
+			ScreenToast = "diag panel " + (showDiag ? "ON" : "OFF");
+			toastUntil = Time.realtimeSinceStartup + 2f;
+		}
 	}
 
 	private void OnGUI()
@@ -43,6 +51,21 @@ public sealed class Plugin : BaseUnityPlugin
 			val.wordWrap = true;
 			GUI.Box(new Rect(12f, 12f, 520f, 70f), "");
 			GUI.Label(new Rect(20f, 16f, 504f, 62f), ScreenToast, val);
+		}
+		if (showDiag)
+		{
+			string[] lines = ChunkStreamer.LastDiagLines(14);
+			if (lines.Length > 0)
+			{
+				GUIStyle style = new GUIStyle(GUI.skin.label);
+				style.fontSize = 12;
+				style.normal.textColor = Color.yellow;
+				GUI.Box(new Rect(12f, 90f, 620f, 12 + lines.Length * 16), "");
+				for (int i = 0; i < lines.Length; i++)
+				{
+					GUI.Label(new Rect(20f, 96f + i * 16, 600f, 16), lines[i], style);
+				}
+			}
 		}
 	}
 
@@ -61,6 +84,7 @@ public sealed class Plugin : BaseUnityPlugin
 			Patch(harmony, typeof(WorldGeneration), "WorldGenerateStructures", "WorldGenerateStructures_Prefix", prefix: true);
 			Patch(harmony, typeof(WorldGeneration), "Update", "Update_Postfix", prefix: false);
 			Patch(harmony, typeof(WorldGeneration), "Clear", "Clear_Postfix", prefix: false);
+			Patch(harmony, typeof(WorldGeneration), "GenerateObjectAtPos", "GenerateObjectAtPos_Postfix", prefix: false);
 			Logger.LogInfo((object)"GlassM: patches applied");
 		}
 		catch (Exception ex)
