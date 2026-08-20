@@ -108,11 +108,19 @@ public static class ChunkStreamer
 
 	private static int lastScanKey = int.MinValue;
 
-	private static int lastEnqueueKey = int.MinValue;
-
 	private static Vector2Int lastPlayerChunk;
 
 	private static Vector2Int moveDir;
+
+	private static int diagTickCount;
+
+	private static int diagGenCount;
+
+	private static int diagRenderCount;
+
+	private static int diagRenderFixed;
+
+	private static float diagLastLogTime;
 
 	public static readonly bool StreamOn = true;
 
@@ -518,38 +526,17 @@ public static class ChunkStreamer
 		bool flag = false;
 		if (StreamOn)
 		{
-			int enqueueKey = 0;
-			foreach (Vector2Int ppc3 in mpPlayerChunks)
+			foreach (Vector2Int ppc in mpPlayerChunks)
 			{
-				enqueueKey = enqueueKey * 397 + ppc3.x * 31 + ppc3.y;
-			}
-			if (enqueueKey != lastEnqueueKey)
-			{
-				lastEnqueueKey = enqueueKey;
-				for (int idx = mpLastEnqueued.Count - 1; idx >= 0; idx--)
+				for (int i = ppc.x - GEN_RADIUS; i <= ppc.x + GEN_RADIUS; i++)
 				{
-					if (!mpPlayerChunks.Contains(mpLastEnqueued[idx]))
+					for (int j = ppc.y - GEN_RADIUS; j <= ppc.y + GEN_RADIUS; j++)
 					{
-						mpLastEnqueued.RemoveAt(idx);
-					}
-				}
-				foreach (Vector2Int ppc in mpPlayerChunks)
-				{
-					if (mpLastEnqueued.Contains(ppc))
-					{
-						continue;
-					}
-					mpLastEnqueued.Add(ppc);
-					for (int i = ppc.x - GEN_RADIUS; i <= ppc.x + GEN_RADIUS; i++)
-					{
-						for (int j = ppc.y - GEN_RADIUS; j <= ppc.y + GEN_RADIUS; j++)
+						if (i >= 0 && j >= 0 && i <= 15 && j <= 15 && !genData[i, j] && !inQueue[i, j])
 						{
-							if (i >= 0 && j >= 0 && i <= 15 && j <= 15 && !genData[i, j] && !inQueue[i, j])
-							{
-								queue.Add(new Vector2Int(i, j));
-								inQueue[i, j] = true;
-								flag = true;
-							}
+							queue.Add(new Vector2Int(i, j));
+							inQueue[i, j] = true;
+							flag = true;
 						}
 					}
 				}
@@ -642,6 +629,47 @@ public static class ChunkStreamer
 				}
 			}
 		}
+		for (int m2 = pc.x - RENDER_RADIUS; m2 <= pc.x + RENDER_RADIUS; m2++)
+		{
+			for (int n2 = pc.y - RENDER_RADIUS; n2 <= pc.y + RENDER_RADIUS; n2++)
+			{
+				if (m2 >= 0 && n2 >= 0 && m2 < 16 && n2 < 16 && dirtyRender[m2, n2] && genApplied[m2, n2])
+				{
+					RenderChunk(new Vector2Int(m2, n2));
+					diagRenderFixed++;
+				}
+			}
+		}
+		diagTickCount++;
+		if (Time.realtimeSinceStartup - diagLastLogTime > 5f)
+		{
+			diagLastLogTime = Time.realtimeSinceStartup;
+			int dirtyTotal = 0;
+			for (int m3 = 0; m3 < 16; m3++)
+			{
+				for (int n3 = 0; n3 < 16; n3++)
+				{
+					if (dirtyRender[m3, n3])
+					{
+						dirtyTotal++;
+					}
+				}
+			}
+			Plugin.Log.LogInfo(string.Concat(new object[]
+			{
+				"[CSDIAG] ticks=", diagTickCount, " plrs=", mpPlayerChunks.Count, " pc=", pc, " q=", queue.Count, " pf=", pendingFull.Count, " gen=", diagGenCount, " ren=", diagRenderCount, " fix=", diagRenderFixed, " dirty=", dirtyTotal, " colFlip=", num3, " ore=", diagOreMs, "ms ren=", diagRenderMs, "ms struct=", diagStructMs, "ms refresh=", diagRefreshMs, "ms apply=", diagApplyMs, "ms"
+			}));
+			diagTickCount = 0;
+			diagGenCount = 0;
+			diagRenderCount = 0;
+			diagRenderFixed = 0;
+			diagOreMs = 0L;
+			diagRenderMs = 0L;
+			diagStructMs = 0L;
+			diagRefreshMs = 0L;
+			diagApplyMs = 0L;
+			diagApplyCount = 0;
+		}
 	}
 
 	private static int Dist2(Vector2Int a, Vector2Int b)
@@ -684,9 +712,11 @@ public static class ChunkStreamer
 		catch (Exception ex)
 		{
 			Plugin.Log.LogWarning((object)("chunk gen failed " + c.ToString() + ": " + ex));
+			genData[c.x, c.y] = false;
 			return;
 		}
 		ApplyChunk(c, array);
+		diagGenCount++;
 	}
 
 	private static void ApplyChunk(Vector2Int c, ushort[,] data)
@@ -749,6 +779,8 @@ public static class ChunkStreamer
 			ManualLogSource log = Plugin.Log;
 			Vector2Int val = c;
 			log.LogWarning((object)("chunk apply failed " + val.ToString() + ": " + ex));
+			genApplied[c.x, c.y] = false;
+			genData[c.x, c.y] = false;
 		}
 	}
 
@@ -759,6 +791,7 @@ public static class ChunkStreamer
 		{
 			return;
 		}
+		diagRenderCount++;
 		int num = c.x * CS;
 		int num2 = c.y * CS;
 		int hALFCHUNKSIZE = W.HALFCHUNKSIZE;
