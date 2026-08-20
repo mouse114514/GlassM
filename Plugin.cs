@@ -14,18 +14,7 @@ public sealed class Plugin : BaseUnityPlugin
 
 	private void Update()
 	{
-		if (Input.GetKeyDown(KeyCode.B))
-		{
-			string text = ChunkStreamer.BuildDiagText();
-			try
-			{
-				GUIUtility.systemCopyBuffer = text;
-			}
-			catch
-			{
-			}
-			ChunkStreamer.LogToGameConsole("CSDIAG copied to clipboard: " + ChunkStreamer.DiagBufferCount + " lines, " + text.Length + " chars");
-		}
+		Diag.HandleInput();
 	}
 
 	private void Awake()
@@ -44,7 +33,6 @@ public sealed class Plugin : BaseUnityPlugin
 			Patch(harmony, typeof(WorldGeneration), "Update", "Update_Postfix", prefix: false);
 			Patch(harmony, typeof(WorldGeneration), "Clear", "Clear_Postfix", prefix: false);
 			Patch(harmony, typeof(WorldGeneration), "GenerateObjectAtPos", "GenerateObjectAtPos_Postfix", prefix: false);
-			Patch(harmony, typeof(ConsoleScript), "RegisterAllCommands", "RegisterAllCommands_Postfix", prefix: false);
 			Logger.LogInfo((object)"GlassM: patches applied");
 		}
 		catch (Exception ex)

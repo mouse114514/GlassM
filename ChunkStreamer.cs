@@ -122,10 +122,6 @@ public static class ChunkStreamer
 
 	private static float diagLastLogTime;
 
-	private static readonly string DiagLogPath = System.IO.Path.Combine("BepInEx", "plugins", "GlassM-diag.log");
-
-	private static readonly List<string> diagBuffer = new List<string>();
-
 	private static bool spawnProtected;
 
 	private static Vector2Int spawnCenter;
@@ -674,20 +670,7 @@ public static class ChunkStreamer
 			{
 				"[CSDIAG] ticks=", diagTickCount, " plrs=", mpPlayerChunks.Count, " pc=", pc, " q=", queue.Count, " pf=", pendingFull.Count, " gen=", diagGenCount, " ren=", diagRenderCount, " fix=", diagRenderFixed, " dirty=", dirtyTotal, " colFlip=", num3, " ore=", diagOreMs, "ms ren=", diagRenderMs, "ms struct=", diagStructMs, "ms refresh=", diagRefreshMs, "ms apply=", diagApplyMs, "ms"
 			});
-			Plugin.Log.LogInfo(diagLine);
-			LogToGameConsole(diagLine);
-			diagBuffer.Add(diagLine);
-			while (diagBuffer.Count > 300)
-			{
-				diagBuffer.RemoveAt(0);
-			}
-			try
-			{
-				System.IO.File.AppendAllText(DiagLogPath, diagLine + Environment.NewLine);
-			}
-			catch
-			{
-			}
+			Diag.Log(diagLine);
 			diagTickCount = 0;
 			diagGenCount = 0;
 			diagRenderCount = 0;
@@ -699,56 +682,6 @@ public static class ChunkStreamer
 			diagApplyMs = 0L;
 			diagApplyCount = 0;
 		}
-	}
-
-	public static string BuildDiagText()
-	{
-		if (diagBuffer.Count == 0)
-		{
-			return "(no CSDIAG lines yet)";
-		}
-		return string.Join(Environment.NewLine, diagBuffer);
-	}
-
-	public static int DiagBufferCount => diagBuffer.Count;
-
-	private static readonly MethodInfo m_logToConsole = typeof(ConsoleScript).GetMethod("LogToConsole", BindingFlags.Instance | BindingFlags.NonPublic);
-
-	public static bool GameConsoleLogEnabled = true;
-
-	public static void ToggleGameConsoleLog()
-	{
-		GameConsoleLogEnabled = !GameConsoleLogEnabled;
-		LogToGameConsole("GlassM console logging " + (GameConsoleLogEnabled ? "ON" : "OFF"), true);
-	}
-
-	public static void LogToGameConsole(string text, bool force = false)
-	{
-		if (!force && !GameConsoleLogEnabled)
-		{
-			return;
-		}
-		try
-		{
-			ConsoleScript instance = ConsoleScript.instance;
-			if ((Object)(object)instance != (Object)null && m_logToConsole != null)
-			{
-				m_logToConsole.Invoke(instance, new object[1] { text });
-			}
-		}
-		catch
-		{
-		}
-	}
-
-	public static string[] LastDiagLines(int count)
-	{
-		if (diagBuffer.Count == 0)
-		{
-			return new string[0];
-		}
-		int n = Math.Min(count, diagBuffer.Count);
-		return diagBuffer.GetRange(diagBuffer.Count - n, n).ToArray();
 	}
 
 	private static int Dist2(Vector2Int a, Vector2Int b)

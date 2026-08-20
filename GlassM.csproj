@@ -9,6 +9,9 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'=='Release'">
+    <DefineConstants>$(DefineConstants);PUBLIC_BUILD</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
     <Reference Include="BepInEx">
       <HintPath>C:\Users\Administrator\Desktop\work\Cu-SaveManager-main\references\BepInEx.dll</HintPath>
