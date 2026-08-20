@@ -1970,6 +1970,8 @@ public static class ChunkStreamer
 			{
 				DistributeLoose(c, "fleshchunk", 0.015f * totalLootRarity, 0.02f * totalLootRarity, true, Vector2.down, true, false);
 			}
+			Diag.Log("[CE] done b0 c=(" + c.x + "," + c.y + ") placed=" + diagEntityCount);
+			diagEntityCount = 0;
 			return;
 		}
 		if (biome == 2 || biome == 3)
@@ -2006,6 +2008,8 @@ public static class ChunkStreamer
 			DistributeLoose(c, "oilpipe", 0.3f, 0.4f, false, Vector2.down, true, false);
 			DistributeLoose(c, "turret", 0.12f * totalTrapRarity * ((biome == 2) ? 1f : 0.66f), 0.15f * totalTrapRarity * ((biome == 2) ? 1f : 0.66f), true, (Random.value > 0.5f) ? Vector2.right : Vector2.left, false, false);
 			DistributeLoose(c, "stalactite", 1.5f * totalTrapRarity, 2f * totalTrapRarity, true, Vector2.up, false, false);
+			Diag.Log("[CE] done b23 c=(" + c.x + "," + c.y + ") placed=" + diagEntityCount);
+			diagEntityCount = 0;
 			return;
 		}
 		D(c, "glowplant", 0.2f, 0.3f, 1.25f, 10f, 0.25f, inGround: false, flip: true, SoilCheck);
@@ -2040,7 +2044,7 @@ public static class ChunkStreamer
 		D(c, "geyser", 0.7f, 0.8f, 0.6f, 0f, 0f, inGround: false, flip: false, SoftCheck);
 		D(c, "skullcrusher", 1.1f, 1.2f, 1f, 10f, 0f, inGround: false, flip: true, null, Vector2.up);
 		DistributeLoose(c, "wallflower", 6f, 7f, false, Vector2.down, true, false);
-		Diag.Log("[CE] done c=(" + c.x + "," + c.y + ") placed=" + diagEntityCount);
+		Diag.Log("[CE] done bX c=(" + c.x + "," + c.y + ") placed=" + diagEntityCount);
 		diagEntityCount = 0;
 	}
 
@@ -2132,6 +2136,7 @@ public static class ChunkStreamer
 			GameObject structObj = GetStructObj(name);
 			if ((Object)(object)structObj == (Object)null)
 			{
+				Diag.Log("[CE] null-res " + name);
 				continue;
 			}
 			Vector2 vector = new Vector2((float)hx + 0.5f, (float)hy + 1f);
@@ -2188,6 +2193,7 @@ public static class ChunkStreamer
 			GameObject structObj = GetStructObj(name);
 			if ((Object)(object)structObj == (Object)null)
 			{
+				Diag.Log("[CE] null-res " + name);
 				continue;
 			}
 			val = new Vector2((float)hx + 0.5f, (float)hy + 1f);
