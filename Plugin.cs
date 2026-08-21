@@ -15,6 +15,7 @@ public sealed class Plugin : BaseUnityPlugin
 	private void Update()
 	{
 		Diag.HandleInput();
+		ChunkStreamer.Tick();
 	}
 
 	private void Awake()
@@ -23,22 +24,27 @@ public sealed class Plugin : BaseUnityPlugin
 		//IL_0034: Expected O, but got Unknown
 		Log = Logger;
 		Logger.LogInfo((object)"GlassM loading");
+		Harmony harmony = new Harmony(Info.Metadata.GUID);
+		TryPatch(harmony, typeof(WorldGeneration), "WorldGenerateTerrain", "WorldGenerateTerrain_Prefix", prefix: true);
+		TryPatch(harmony, typeof(WorldGeneration), "UpdateWorld", "UpdateWorld_Prefix", prefix: true);
+		TryPatch(harmony, typeof(WorldGeneration), "WorldPlaceEntities", "WorldPlaceEntities_Prefix", prefix: true);
+		TryPatch(harmony, typeof(WorldGeneration), "WorldGenerateStructures", "WorldGenerateStructures_Prefix", prefix: true);
+		TryPatch(harmony, typeof(WorldGeneration), "Update", "Update_Postfix", prefix: false);
+		TryPatch(harmony, typeof(WorldGeneration), "Clear", "Clear_Postfix", prefix: false);
+		TryPatch(harmony, typeof(WorldGeneration), "GenerateObjectAtPos", "GenerateObjectAtPos_Postfix", prefix: false);
+		Logger.LogInfo((object)"GlassM: patches applied");
+	}
+
+	private static void TryPatch(Harmony harmony, Type targetType, string target, string patchMethod, bool prefix)
+	{
 		try
 		{
-			Harmony harmony = new Harmony(Info.Metadata.GUID);
-			Patch(harmony, typeof(WorldGeneration), "WorldGenerateTerrain", "WorldGenerateTerrain_Prefix", prefix: true);
-			Patch(harmony, typeof(WorldGeneration), "UpdateWorld", "UpdateWorld_Prefix", prefix: true);
-			Patch(harmony, typeof(WorldGeneration), "WorldPlaceEntities", "WorldPlaceEntities_Prefix", prefix: true);
-			Patch(harmony, typeof(WorldGeneration), "WorldGenerateStructures", "WorldGenerateStructures_Prefix", prefix: true);
-			Patch(harmony, typeof(WorldGeneration), "Update", "Update_Postfix", prefix: false);
-			Patch(harmony, typeof(WorldGeneration), "Clear", "Clear_Postfix", prefix: false);
-			Patch(harmony, typeof(WorldGeneration), "GenerateObjectAtPos", "GenerateObjectAtPos_Postfix", prefix: false);
-			Logger.LogInfo((object)"GlassM: patches applied");
+			Patch(harmony, targetType, target, patchMethod, prefix);
 		}
 		catch (Exception ex)
 		{
-			Logger.LogError((object)("GlassM: patch failed " + ex));
-			Patches.Report.Add("PATCH FAIL: " + ex.Message);
+			Log.LogError((object)("CS: patch " + target + " failed: " + ex));
+			Patches.Report.Add("PATCH FAIL " + target + ": " + ex.Message);
 		}
 	}
 

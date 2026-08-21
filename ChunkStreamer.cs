@@ -124,6 +124,7 @@ public static class ChunkStreamer
 
 	private static float diagLastLogTime;
 	private static float diagBlockLogTime;
+	private static int lastTickFrame = -1;
 
 	private static bool spawnProtected;
 
@@ -517,6 +518,11 @@ public static class ChunkStreamer
 		//IL_041f: Unknown result type (might be due to invalid IL or missing references)
 		//IL_0425: Unknown result type (might be due to invalid IL or missing references)
 		//IL_04ff: Unknown result type (might be due to invalid IL or missing references)
+		if (Time.frameCount == lastTickFrame)
+		{
+			return;
+		}
+		lastTickFrame = Time.frameCount;
 		bool wbOk = false;
 		bool chOk = false;
 		try
