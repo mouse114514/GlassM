@@ -12,6 +12,13 @@ public static class Patches
 	[HarmonyPrefix]
 	private static bool WorldGenerateTerrain_Prefix(WorldGeneration __instance)
 	{
+		if ((int)__instance.biomeOverride > 0)
+		{
+			Plugin.Log.LogInfo((object)("CS: override scene " + (object)__instance.biomeOverride + ", vanilla pipeline"));
+			ChunkStreamer.Active = false;
+			ChunkStreamer.OnClear();
+			return true;
+		}
 		Plugin.Log.LogInfo((object)("CS: WorldGenerateTerrain intercepted, biome=" + __instance.biomeDepth));
 		ChunkStreamer.OnNewWorld(__instance);
 		ChunkStreamer.InitTerrain(__instance);
@@ -24,6 +31,10 @@ public static class Patches
 	[HarmonyPrefix]
 	private static bool UpdateWorld_Prefix()
 	{
+		if (!ChunkStreamer.Active)
+		{
+			return true;
+		}
 		Plugin.Log.LogInfo((object)"CS: UpdateWorld skipped");
 		return false;
 	}
@@ -32,6 +43,10 @@ public static class Patches
 	[HarmonyPrefix]
 	private static bool WorldPlaceEntities_Prefix()
 	{
+		if (!ChunkStreamer.Active)
+		{
+			return true;
+		}
 		Plugin.Log.LogInfo((object)"CS: WorldPlaceEntities skipped");
 		return false;
 	}
