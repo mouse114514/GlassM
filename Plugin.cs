@@ -31,7 +31,6 @@ public sealed class Plugin : BaseUnityPlugin
 		TryPatch(harmony, typeof(WorldGeneration), "WorldGenerateStructures", "WorldGenerateStructures_Prefix", prefix: true);
 		TryPatch(harmony, typeof(WorldGeneration), "Update", "Update_Postfix", prefix: false);
 		TryPatch(harmony, typeof(WorldGeneration), "Clear", "Clear_Postfix", prefix: false);
-		TryPatch(harmony, typeof(WorldGeneration), "GenerateObjectAtPos", "GenerateObjectAtPos_Postfix", prefix: false);
 		Logger.LogInfo((object)"GlassM: patches applied");
 	}
 

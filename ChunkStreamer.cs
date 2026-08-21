@@ -30,6 +30,8 @@ public static class ChunkStreamer
 
 	private static readonly FieldInfo f_chunks = typeof(WorldGeneration).GetField("chunks", BindingFlags.Instance | BindingFlags.NonPublic);
 
+	private static readonly MethodInfo m_generateOres = typeof(WorldGeneration).GetMethod("GenerateOres", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
 	private static FastNoiseLite caveNoise;
 
 	private static FastNoiseLite dirtPerlin;
@@ -126,12 +128,6 @@ public static class ChunkStreamer
 	private static float diagBlockLogTime;
 	private static int lastTickFrame = -1;
 
-	private static bool spawnProtected;
-
-	private static Vector2Int spawnCenter;
-
-	private static bool[,] protectedCell;
-
 	public static readonly bool StreamOn = true;
 
 	private static readonly string[] Crystals = new string[7] { "BloodCrystal", "SoothingCrystal", "ReliefCrystal", "TurbulentCrystal", "OxygenCrystal", "EmissiveCrystal", "DigestionCrystal" };
@@ -196,8 +192,6 @@ public static class ChunkStreamer
 		Array.Clear(genApplied, 0, genApplied.Length);
 		Array.Clear(dirtyRender, 0, dirtyRender.Length);
 		queue.Clear();
-		protectedCell = new bool[(int)w.width, (int)w.height];
-		spawnProtected = false;
 	}
 
 	public static void OnClear()
@@ -210,8 +204,6 @@ public static class ChunkStreamer
 		Array.Clear(dirtyRender, 0, dirtyRender.Length);
 		queue.Clear();
 		pendingFull.Clear();
-		protectedCell = null;
-		spawnProtected = false;
 	}
 
 	private static bool InWorld(Vector2Int c)
@@ -320,44 +312,58 @@ public static class ChunkStreamer
 
 	public static void GenerateInitial()
 	{
-		//IL_0032: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0033: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0038: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0050: Unknown result type (might be due to invalid IL or missing references)
-		Vector2Int val = default(Vector2Int);
-		val = new Vector2Int((int)((long)(W.width / 2u) / (long)CS), (int)((long)(W.height / 2u) / (long)CS));
+		Vector2Int val = new Vector2Int((int)(W.width / 2u) / CS, (int)(W.height / 2u) / CS);
 		PlayerChunk = val;
-		for (int i = val.x; i <= val.x + 1; i++)
+		FullDataFill();
+		GenSpawnCavity();
+		InvokeGenerateOres();
+		if (StreamOn)
 		{
-			for (int j = val.y; j <= val.y + 1; j++)
+			EnqueueAround(val, GEN_RADIUS);
+		}
+	}
+
+	private static void FullDataFill()
+	{
+		Stopwatch stopwatch = Stopwatch.StartNew();
+		ushort[,] array = new ushort[CS, CS];
+		for (int i = 0; i < 16; i++)
+		{
+			for (int j = 0; j < 16; j++)
 			{
-				if (i >= 0 && j >= 0 && i <= 15 && j <= 15 && !genData[i, j] && !genApplied[i, j])
+				GenChunkTerrainInto(new Vector2Int(i, j), array);
+				int num = i * CS;
+				int num2 = j * CS;
+				for (int k = 0; k < CS; k++)
 				{
-					SyncGenAndWait(new Vector2Int(i, j));
+					for (int l = 0; l < CS; l++)
+					{
+						WB[num + k, num2 + l] = array[k, l];
+					}
 				}
 			}
 		}
-		GenSpawnCavity();
-		if (StreamOn)
+		Diag.Log("[CSDIAG] full data fill done in " + stopwatch.ElapsedMilliseconds + "ms");
+	}
+
+	private static void InvokeGenerateOres()
+	{
+		try
 		{
-			EnqueueAround(val, GEN_RADIUS, genNow: false);
+			m_generateOres?.Invoke(W, null);
+			Diag.Log("[CSDIAG] GenerateOres invoked (vanilla ores + mod hooks)");
+		}
+		catch (Exception ex)
+		{
+			Plugin.Log.LogWarning((object)("GenerateOres invoke failed: " + ex));
 		}
 	}
 
 	private static void GenSpawnCavity()
 	{
-		//IL_004f: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0123: Unknown result type (might be due to invalid IL or missing references)
 		if ((Object)(object)W == (Object)null || WB == null)
 		{
 			return;
-		}
-		int num = 508 / CS;
-		int num2 = 516 / CS;
-		int num3 = 1011 / CS;
-		for (int i = num; i <= num2; i++)
-		{
-			SyncGenAndWait(new Vector2Int(i, num3));
 		}
 		for (int j = 508; j <= 516; j++)
 		{
@@ -372,64 +378,24 @@ public static class ChunkStreamer
 		{
 			WB[l, 1023] = 0;
 		}
-		for (int m = num; m <= num2; m++)
-		{
-			RenderChunk(new Vector2Int(m, num3));
-		}
-		Plugin.Log.LogInfo((object)("CS: spawn cavity done, cols=" + num + "-" + num2 + " row=" + num3));
+		Plugin.Log.LogInfo((object)"CS: spawn cavity carved into worldBlocks");
 	}
 
-	private static void EnqueueAround(Vector2Int c, int radius, bool genNow)
+	private static void EnqueueAround(Vector2Int c, int radius)
 	{
-		//IL_002a: Unknown result type (might be due to invalid IL or missing references)
-		//IL_007c: Unknown result type (might be due to invalid IL or missing references)
-		//IL_008c: Unknown result type (might be due to invalid IL or missing references)
 		Vector2Int val = default(Vector2Int);
 		for (int i = c.x - radius; i <= c.x + radius; i++)
 		{
 			for (int j = c.y - radius; j <= c.y + radius; j++)
 			{
 				val = new Vector2Int(i, j);
-				if (!InWorld(val) || genData[val.x, val.y])
-				{
-					continue;
-				}
-				if (genNow)
-				{
-					if (!genApplied[val.x, val.y])
-					{
-						SyncGenAndWait(val);
-					}
-				}
-				else
+				if (InWorld(val) && !genData[val.x, val.y])
 				{
 					queue.Add(val);
 					inQueue[val.x, val.y] = true;
 				}
 			}
 		}
-	}
-
-	private static void SyncGenAndWait(Vector2Int cc)
-	{
-		if (genData[cc.x, cc.y] || genApplied[cc.x, cc.y])
-		{
-			return;
-		}
-		genData[cc.x, cc.y] = true;
-		genFull[cc.x, cc.y] = false;
-		ushort[,] array = new ushort[CS, CS];
-		try
-		{
-			GenChunkTerrainInto(cc, array);
-			ApplyBordersInto(array, cc.x * CS, cc.y * CS);
-		}
-		catch (Exception ex)
-		{
-			Plugin.Log.LogWarning((object)("sync gen failed " + cc.ToString() + ": " + ex));
-			return;
-		}
-		ApplyChunk(cc, array);
 	}
 
 	private static void CollectPlayers()
@@ -554,7 +520,6 @@ public static class ChunkStreamer
 			Time.fixedDeltaTime = 0.03f;
 		}
 		CollectPlayers();
-		TryProtectSpawn();
 		Vector2Int pc = PlayerChunk;
 		try
 		{
@@ -599,7 +564,6 @@ public static class ChunkStreamer
 				pendingFull.RemoveAt(0);
 				try
 				{
-					GenChunkOres(val3);
 					GenChunkLiquids(val3);
 					GenChunkEntities(val3);
 				}
@@ -744,41 +708,6 @@ public static class ChunkStreamer
 		return num3;
 	}
 
-	private static void ApplyBordersInto(ushort[,] wb, int ox, int oy)
-	{
-		int x0 = ox;
-		int x1 = ox + CS;
-		if (x0 < 8)
-		{
-			int right = Math.Min(x1, 8);
-			for (int i = x0; i < right; i++)
-			{
-				for (int j = 0; j < CS; j++)
-				{
-					if (Random.Range(0f, 1f) > (float)i * 0.125f)
-					{
-						wb[i - ox, j] = 14;
-					}
-				}
-			}
-		}
-		int width = (int)W.width;
-		if (x1 > width - 8)
-		{
-			int left = Math.Max(x0, width - 8);
-			for (int k = left; k < x1; k++)
-			{
-				for (int l = 0; l < CS; l++)
-				{
-					if (Random.Range(0f, 1f) > (float)(width - 1 - k) * 0.125f)
-					{
-						wb[k - ox, l] = 14;
-					}
-				}
-			}
-		}
-	}
-
 	private static void GenChunk(Vector2Int c, bool full)
 	{
 		if (genData[c.x, c.y] || genApplied[c.x, c.y])
@@ -788,33 +717,12 @@ public static class ChunkStreamer
 		genData[c.x, c.y] = true;
 		genFull[c.x, c.y] = full;
 		inQueue[c.x, c.y] = false;
-		ushort[,] array = new ushort[CS, CS];
-		try
-		{
-			GenChunkTerrainInto(c, array);
-			ApplyBordersInto(array, c.x * CS, c.y * CS);
-		}
-		catch (Exception ex)
-		{
-			Plugin.Log.LogWarning((object)("chunk gen failed " + c.ToString() + ": " + ex));
-			genData[c.x, c.y] = false;
-			return;
-		}
-		ApplyChunk(c, array);
+		ApplyChunk(c);
 		diagGenCount++;
 	}
 
-	private static void ApplyChunk(Vector2Int c, ushort[,] data)
+	private static void ApplyChunk(Vector2Int c)
 	{
-		//IL_00d4: Unknown result type (might be due to invalid IL or missing references)
-		//IL_00db: Unknown result type (might be due to invalid IL or missing references)
-		//IL_00e2: Unknown result type (might be due to invalid IL or missing references)
-		//IL_00f2: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0113: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0133: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0153: Unknown result type (might be due to invalid IL or missing references)
-		//IL_0199: Unknown result type (might be due to invalid IL or missing references)
-		//IL_019a: Unknown result type (might be due to invalid IL or missing references)
 		if (genApplied[c.x, c.y])
 		{
 			return;
@@ -823,19 +731,9 @@ public static class ChunkStreamer
 		Stopwatch stopwatch = Stopwatch.StartNew();
 		try
 		{
-			int num = c.x * CS;
-			int num2 = c.y * CS;
-			for (int i = 0; i < CS; i++)
-			{
-				for (int j = 0; j < CS; j++)
-				{
-					WB[num + i, num2 + j] = data[i, j];
-				}
-			}
 			Stopwatch stopwatch2 = Stopwatch.StartNew();
 			if (genFull[c.x, c.y])
 			{
-				GenChunkOres(c);
 				GenChunkLiquids(c);
 				GenChunkEntities(c);
 			}
@@ -866,105 +764,6 @@ public static class ChunkStreamer
 			log.LogWarning((object)("chunk apply failed " + val.ToString() + ": " + ex));
 			genApplied[c.x, c.y] = false;
 			genData[c.x, c.y] = false;
-		}
-	}
-
-	private static void TryProtectSpawn()
-	{
-		if (spawnProtected || !Active || W == null)
-		{
-			return;
-		}
-		Body body = (PlayerCamera.main != null) ? PlayerCamera.main.body : null;
-		if ((Object)(object)body == (Object)null)
-		{
-			return;
-		}
-		Vector2Int b = W.WorldToBlockPos(((Component)body).transform.position);
-		if (b.x < 0 || b.y < 0 || b.x >= (int)W.width || b.y >= (int)W.height)
-		{
-			return;
-		}
-		int dist = Math.Max(Math.Abs(b.x - (int)W.halfWidth), Math.Abs(b.y - (int)W.halfHeight));
-		if (dist < 8)
-		{
-			return;
-		}
-		spawnProtected = true;
-		spawnCenter = b;
-		Plugin.Log.LogInfo((object)("CS: spawn recorded at block " + b.ToString()));
-	}
-
-	public static void ProtectObjectArea(Vector2Int pos, Tilemap tilemap)
-	{
-		if (protectedCell == null || (Object)(object)tilemap == (Object)null)
-		{
-			return;
-		}
-		BoundsInt bounds = tilemap.cellBounds;
-		for (int i = bounds.xMin; i < bounds.xMax; i++)
-		{
-			for (int j = bounds.yMin; j < bounds.yMax; j++)
-			{
-				if (!tilemap.HasTile(new Vector3Int(i, j)))
-				{
-					continue;
-				}
-				int gx = pos.x + i;
-				int gy = pos.y + j;
-				if (gx >= 0 && gy >= 0 && gx < protectedCell.GetLength(0) && gy < protectedCell.GetLength(1))
-				{
-					protectedCell[gx, gy] = true;
-				}
-			}
-		}
-	}
-
-	public static void RefreshChunkAtBlock(Vector2Int blockPos)
-	{
-		int cx = blockPos.x / CS;
-		int cy = blockPos.y / CS;
-		if (InWorld(new Vector2Int(cx, cy)) && genApplied[cx, cy])
-		{
-			RenderChunk(new Vector2Int(cx, cy), true);
-		}
-	}
-
-	private static void ApplyProtected(ushort[,] wb, int ox, int oy)
-	{
-		if (protectedCell != null)
-		{
-			int width = protectedCell.GetLength(0);
-			int height = protectedCell.GetLength(1);
-			for (int i = 0; i < CS; i++)
-			{
-				for (int j = 0; j < CS; j++)
-				{
-					int gx = ox + i;
-					int gy = oy + j;
-					if (gx < width && gy < height && protectedCell[gx, gy])
-					{
-						wb[i, j] = WB[gx, gy];
-					}
-				}
-			}
-		}
-		if (spawnProtected)
-		{
-			int minX = Mathf.Max(ox, spawnCenter.x - 16);
-			int maxX = Mathf.Min(ox + CS - 1, spawnCenter.x + 16);
-			int minY = Mathf.Max(oy, spawnCenter.y - 16);
-			int maxY = Mathf.Min(oy + CS - 1, spawnCenter.y + 16);
-			if (minX <= maxX && minY <= maxY)
-			{
-				for (int i = minX; i <= maxX; i++)
-				{
-					for (int j = minY; j <= maxY; j++)
-					{
-						wb[i - ox, j - oy] = WB[i, j];
-					}
-				}
-			}
 		}
 	}
 
@@ -1504,23 +1303,6 @@ public static class ChunkStreamer
 		}
 	}
 
-	private static void IronVein(Vector2Int c, int width)
-	{
-		Vector2Int val = default(Vector2Int);
-		val = new Vector2Int(Random.Range(c.x * CS, c.x * CS + CS), Random.Range(c.y * CS, c.y * CS + CS));
-		int num = Random.Range(1, 5);
-		for (int i = 0; i < num; i++)
-		{
-			for (int j = 0; j < width; j++)
-			{
-				if (val.x + i < W.width && val.y + j < W.height)
-				{
-					WB[val.x + i, val.y + j] = 5;
-				}
-			}
-		}
-	}
-
 	private static void GenChunkTerrainInto(Vector2Int c, ushort[,] wb)
 	{
 		int num = c.x * CS;
@@ -1566,7 +1348,6 @@ public static class ChunkStreamer
 					wb[i - num, j - num2] = num3;
 				}
 			}
-			ApplyProtected(wb, num, num2);
 			return;
 		}
 		if (biome == 2 || biome == 3)
@@ -1612,7 +1393,6 @@ public static class ChunkStreamer
 					}
 				}
 			}
-			ApplyProtected(wb, num, num2);
 			return;
 		}
 		float num7 = float.NaN;
@@ -1633,110 +1413,6 @@ public static class ChunkStreamer
 					num10 = 0;
 				}
 				wb[m - num, n - num2] = num10;
-			}
-		}
-		ApplyProtected(wb, num, num2);
-	}
-
-	private static void GenChunkOres(Vector2Int c)
-	{
-		ushort[,] wB = WB;
-		int num = Poisson(0.5f);
-		for (int i = 0; i < num; i++)
-		{
-			int num2 = c.x * CS + Random.Range(0, CS);
-			int num3 = c.y * CS + Random.Range(0, CS);
-			for (int num4 = Random.Range(1, 26); num4 > 0; num4--)
-			{
-				if (num2 > 0 && num2 < W.width - 1 && num3 > 0 && num3 < W.height - 1 && wB[num2, num3] > 0)
-				{
-					wB[num2, num3] = 34;
-				}
-				num2 += (Random.value > 0.5f) ? ((Random.value > 0.5f) ? 1 : (-1)) : 0;
-				num3 += (Random.value > 0.5f) ? ((Random.value > 0.5f) ? 1 : (-1)) : 0;
-			}
-		}
-		if (biome == 0)
-		{
-			VeinChunk(c, Random.Range(0.35f, 0.4f), 11, 2, 6, 48, horizontal: true);
-			VeinChunk(c, Random.Range(0.35f, 0.4f), 11, 2, 6, 48, horizontal: false);
-			return;
-		}
-		if (biome == 1)
-		{
-			VeinChunk(c, Random.Range(0.35f, 0.5f), 5, 3, 6, 64, horizontal: true);
-			VeinChunk(c, Random.Range(0.35f, 0.5f), 5, 3, 6, 60, horizontal: false);
-			return;
-		}
-		if (biome == 2 || biome == 3)
-		{
-			VeinChunk(c, Random.Range(0.25f, 0.3f), 11, 2, 6, 48, horizontal: true);
-			VeinChunk(c, Random.Range(0.24f, 0.3f), 11, 2, 6, 48, horizontal: false);
-			if (biome == 3)
-			{
-				VeinChunkSquare(c, 0.5f, 0.6f, 20, 4, 16);
-			}
-			return;
-		}
-		if (biome == 4)
-		{
-			for (int i = 0; i < 4; i++)
-			{
-				if (Random.value < 0.00025f)
-				{
-					int num5 = c.x * CS + Random.Range(0, CS);
-					int num6 = c.y * CS + Random.Range(0, CS);
-					if (wB[num5, num6] > 0)
-					{
-						wB[num5, num6] = 35;
-					}
-				}
-			}
-		}
-	}
-
-	private static void VeinChunkSquare(Vector2Int c, float amtMin, float amtMax, ushort block, int sizeMin, int sizeMax)
-	{
-		int num = Poisson(Random.Range(amtMin, amtMax));
-		for (int i = 0; i < num; i++)
-		{
-			int num2 = c.x * CS + Random.Range(0, CS);
-			int num3 = c.y * CS + Random.Range(0, CS);
-			int num4 = Random.Range(sizeMin, sizeMax);
-			for (int j = 0; j < num4; j++)
-			{
-				for (int k = 0; k < num4; k++)
-				{
-					int num5 = num2 + j;
-					int num6 = num3 + k;
-					if (num5 < W.width && num6 < W.height)
-					{
-						WB[num5, num6] = block;
-					}
-				}
-			}
-		}
-	}
-
-	private static void VeinChunk(Vector2Int c, float amt, ushort block, int w, int lenMin, int lenMax, bool horizontal)
-	{
-		int num = Poisson(amt);
-		Vector2Int val = default(Vector2Int);
-		for (int i = 0; i < num; i++)
-		{
-			val = new Vector2Int(c.x * CS + Random.Range(0, CS), c.y * CS + Random.Range(0, CS));
-			int num2 = Random.Range(lenMin, lenMax);
-			for (int j = 0; j < num2; j++)
-			{
-				for (int k = 0; k < w; k++)
-				{
-					int num3 = (horizontal ? (val.x + j) : (val.x + k));
-					int num4 = (horizontal ? (val.y + k) : (val.y + j));
-					if (num3 < W.width && num4 < W.height)
-					{
-						WB[num3, num4] = block;
-					}
-				}
 			}
 		}
 	}
