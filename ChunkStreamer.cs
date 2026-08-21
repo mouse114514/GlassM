@@ -378,7 +378,26 @@ public static class ChunkStreamer
 		{
 			WB[l, 1023] = 0;
 		}
+		int col0 = 508 / CS;
+		int col1 = 516 / CS;
+		int row = 1011 / CS;
+		for (int m = col0; m <= col1; m++)
+		{
+			SyncApplySpawnChunk(new Vector2Int(m, row));
+		}
 		Plugin.Log.LogInfo((object)"CS: spawn cavity carved into worldBlocks");
+	}
+
+	private static void SyncApplySpawnChunk(Vector2Int cc)
+	{
+		if (genData[cc.x, cc.y] || genApplied[cc.x, cc.y])
+		{
+			return;
+		}
+		genData[cc.x, cc.y] = true;
+		genFull[cc.x, cc.y] = false;
+		ApplyChunk(cc);
+		RenderChunk(cc, force: true);
 	}
 
 	private static void EnqueueAround(Vector2Int c, int radius)
