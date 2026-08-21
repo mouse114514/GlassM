@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.Tilemaps;
@@ -7,6 +8,7 @@ namespace GlassM;
 
 public static class Patches
 {
+	public static readonly List<string> Report = new List<string>();
 	[HarmonyPatch(typeof(WorldGeneration), "WorldGenerateTerrain")]
 	[HarmonyPrefix]
 	private static bool WorldGenerateTerrain_Prefix(WorldGeneration __instance)

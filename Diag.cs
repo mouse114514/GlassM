@@ -53,6 +53,18 @@ namespace GlassM
 		{
 			if (buffer.Count == 0)
 			{
+				try
+				{
+					if (File.Exists(logPath))
+					{
+						string[] lines = File.ReadAllLines(logPath);
+						int take = Math.Min(50, lines.Length);
+						return string.Join(Environment.NewLine, lines, lines.Length - take, take);
+					}
+				}
+				catch
+				{
+				}
 				return "(no CSDIAG lines yet)";
 			}
 			return string.Join(Environment.NewLine, buffer);
@@ -64,6 +76,17 @@ namespace GlassM
 		{
 			if (Input.GetKeyDown(KeyCode.B))
 			{
+				try
+				{
+					ConsoleScript cs = ConsoleScript.instance;
+					if ((Object)(object)cs != (Object)null && cs.active)
+					{
+						return;
+					}
+				}
+				catch
+				{
+				}
 				string text = BuildText();
 				try
 				{

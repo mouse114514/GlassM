@@ -38,6 +38,7 @@ public sealed class Plugin : BaseUnityPlugin
 		catch (Exception ex)
 		{
 			Logger.LogError((object)("GlassM: patch failed " + ex));
+			Patches.Report.Add("PATCH FAIL: " + ex.Message);
 		}
 	}
 
@@ -49,6 +50,7 @@ public sealed class Plugin : BaseUnityPlugin
 		if (methodInfo == null)
 		{
 			Log.LogError((object)("CS: target method not found: " + target));
+			Patches.Report.Add("PATCH MISSING: WorldGeneration." + target);
 			return;
 		}
 		HarmonyMethod val = new HarmonyMethod(typeof(Patches).GetMethod(patchMethod, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic));
@@ -60,6 +62,7 @@ public sealed class Plugin : BaseUnityPlugin
 		{
 			harmony.Patch((MethodBase)methodInfo, (HarmonyMethod)null, val, (HarmonyMethod)null, (HarmonyMethod)null, (HarmonyMethod)null);
 		}
+		Patches.Report.Add("patched WorldGeneration." + target);
 		Log.LogInfo((object)("CS: patched " + target));
 	}
 }

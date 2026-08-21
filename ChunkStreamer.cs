@@ -123,6 +123,7 @@ public static class ChunkStreamer
 	private static int diagRenderFixed;
 
 	private static float diagLastLogTime;
+	private static float diagBlockLogTime;
 
 	private static bool spawnProtected;
 
@@ -181,6 +182,12 @@ public static class ChunkStreamer
 	{
 		W = w;
 		Active = true;
+		Diag.Log("[CSDIAG] new world w=" + w.width + " h=" + w.height + " biome=" + w.biomeDepth + " fwb=" + (f_worldBlocks != null) + " fch=" + (f_chunks != null));
+		foreach (string r in Patches.Report)
+		{
+			Diag.Log("[CSDIAG] " + r);
+		}
+		Diag.Log("[CSDIAG] report end, patches=" + Patches.Report.Count);
 		Array.Clear(genData, 0, genData.Length);
 		Array.Clear(colliderOn, 0, colliderOn.Length);
 		Array.Clear(inQueue, 0, inQueue.Length);
@@ -510,8 +517,30 @@ public static class ChunkStreamer
 		//IL_041f: Unknown result type (might be due to invalid IL or missing references)
 		//IL_0425: Unknown result type (might be due to invalid IL or missing references)
 		//IL_04ff: Unknown result type (might be due to invalid IL or missing references)
-		if (!Active || (Object)(object)W == (Object)null || WB == null || CH == null)
+		bool wbOk = false;
+		bool chOk = false;
+		try
 		{
+			wbOk = WB != null;
+		}
+		catch (Exception)
+		{
+		}
+		try
+		{
+			chOk = CH != null;
+		}
+		catch (Exception)
+		{
+		}
+		if (!Active || (Object)(object)W == (Object)null || !wbOk || !chOk)
+		{
+			if (Time.realtimeSinceStartup - diagBlockLogTime > 5f)
+			{
+				diagBlockLogTime = Time.realtimeSinceStartup;
+				string wState = ((Object)(object)W == (Object)null) ? "0" : "1";
+				Diag.Log("[CSDIAG] tick blocked Active=" + (Active ? 1 : 0) + " W=" + wState + " WB=" + (wbOk ? 1 : 0) + " CH=" + (chOk ? 1 : 0));
+			}
 			return;
 		}
 		if (Time.fixedDeltaTime != 0.03f)
