@@ -874,6 +874,54 @@ public static class ChunkStreamer
 		}
 	}
 
+	private static readonly List<Vector2Int> infiniCells = new List<Vector2Int>();
+
+	private static readonly HashSet<Vector2Int> infiniDirty = new HashSet<Vector2Int>();
+
+	private static void ProtectInfiniBegin(Vector2Int c)
+	{
+		infiniCells.Clear();
+		int x0 = Math.Max(0, c.x * CS - 32);
+		int x1 = Math.Min((int)W.width - 1, (c.x + 1) * CS + 31);
+		int y0 = Math.Max(0, c.y * CS - 32);
+		int y1 = Math.Min((int)W.height - 1, (c.y + 1) * CS + 31);
+		for (int i = x0; i <= x1; i++)
+		{
+			for (int j = y0; j <= y1; j++)
+			{
+				if (WB[i, j] == 14)
+				{
+					infiniCells.Add(new Vector2Int(i, j));
+				}
+			}
+		}
+	}
+
+	private static void ProtectInfiniEnd()
+	{
+		if (infiniCells.Count == 0)
+		{
+			return;
+		}
+		infiniDirty.Clear();
+		foreach (Vector2Int item in infiniCells)
+		{
+			if (WB[item.x, item.y] != 14)
+			{
+				WB[item.x, item.y] = 14;
+				Vector2Int ch = new Vector2Int(item.x / CS, item.y / CS);
+				if (genApplied[ch.x, ch.y])
+				{
+					infiniDirty.Add(ch);
+				}
+			}
+		}
+		foreach (Vector2Int item2 in infiniDirty)
+		{
+			RenderChunk(item2, force: true);
+		}
+	}
+
 	private static bool GenChunkStructures(Vector2Int c)
 	{
 		structPlaced = false;
@@ -886,6 +934,7 @@ public static class ChunkStreamer
 		{
 			return false;
 		}
+		ProtectInfiniBegin(c);
 		try
 		{
 			float totalLootRarity = W.totalLootRarity;
@@ -957,6 +1006,7 @@ public static class ChunkStreamer
 			Vector2Int val = c;
 			log.LogWarning((object)("chunk structures failed " + val.ToString() + ": " + ex));
 		}
+		ProtectInfiniEnd();
 		return structPlaced;
 	}
 
@@ -2019,13 +2069,13 @@ public static class ChunkStreamer
 			}
 			int hx1;
 			int hy1;
-			if (!FindSurface(num5, num6, Vector2.up, out hx1, out hy1, 128))
+			if (!FindSurface(num5, num6, Vector2.up, out hx1, out hy1, CS * 4))
 			{
 				continue;
 			}
 			int hx2;
 			int hy2;
-			if (!FindSurface(num5, num6, Vector2.down, out hx2, out hy2, 128))
+			if (!FindSurface(num5, num6, Vector2.down, out hx2, out hy2, CS * 4))
 			{
 				continue;
 			}
@@ -2040,8 +2090,8 @@ public static class ChunkStreamer
 				Diag.Log("[CE] null-res sandvine");
 				continue;
 			}
-			Vector2 top = W.BlockToWorldPos(new Vector2Int(hx1, hy1));
-			Vector2 bottom = new Vector2((float)hx2 + 0.5f, (float)(hy2 - (int)W.halfHeight + 1));
+			Vector2 top = W.BlockToWorldPos(new Vector2Int(hx1, hy1 - 1));
+			Vector2 bottom = new Vector2(top.x, (float)(hy2 - (int)W.halfHeight + 1));
 			Color color = Color.Lerp(Color.gray, Color.white, Random.value);
 			GameObject gameObject3 = Object.Instantiate<GameObject>(structObj, (Vector2)(top), Quaternion.identity);
 			GameObject obj = Object.Instantiate<GameObject>(structObj2, (Vector2)((top + bottom) * 0.5f), Quaternion.identity);
