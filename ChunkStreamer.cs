@@ -1885,23 +1885,23 @@ public static class ChunkStreamer
 			D(c, "medcrate", 0.18f * totalLootRarity, 0.2f * totalLootRarity, 3f, 180f);
 			D(c, "containercrate", 0.05f * totalLootRarity, 0.07f * totalLootRarity, 3f, 180f);
 			D(c, "foodbox", 0.1f * totalLootRarity, 0.13f * totalLootRarity, 3f, 180f);
-			D(c, "spikestabber", 0.4f * totalTrapRarity, 0.5f * totalTrapRarity);
-			D(c, "shadecrawler", 0.4f * totalTrapRarity, 0.42f * totalTrapRarity, 2f, 180f);
+D(c, "spikestabber", 0.4f * totalTrapRarity, 0.5f * totalTrapRarity, -0.5f);
+			D(c, "shadecrawler", 0.4f * totalTrapRarity, 0.42f * totalTrapRarity, -0.5f, 2f, 180f);
 			D(c, "corpse", 1f * lootRarityMultiplier, 1.1f * lootRarityMultiplier, 0f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
 			D(c, "animalcorpse", 0.6f * lootRarityMultiplier, 0.7f * lootRarityMultiplier, 0f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
 			D(c, "drillpod", 0.09f, 0.1f, 0f, 0f, 0f, inGround: true, flip: true);
 			if (biome > 0)
 			{
-				D(c, "barbedwirefence", 0.6f * totalTrapRarity, 0.8f * totalTrapRarity, 4.8f);
-				D(c, "beartrap", 0.2f * totalTrapRarity, 0.25f * totalTrapRarity, 1f);
-				D(c, "CaveTicks", 0.15f * totalTrapRarity, 0.2f * totalTrapRarity, 4f, 0f, 3f);
+				D(c, "barbedwirefence", 0.6f * totalTrapRarity, 0.8f * totalTrapRarity, -0.5f, 4.8f);
+				D(c, "beartrap", 0.2f * totalTrapRarity, 0.25f * totalTrapRarity, -0.5f, 1f);
+				D(c, "CaveTicks", 0.15f * totalTrapRarity, 0.2f * totalTrapRarity, -0.5f, 0f, 3f);
 				D(c, "geyser", 1.6f, 1.8f, 0.6f, 0f, 0f, inGround: false, flip: false, SoftCheck);
 			}
 			else
 			{
 				D(c, "geyser", 0.7f, 0.8f, 0.6f, 0f, 0f, inGround: false, flip: false, SoftCheck);
 			}
-			D(c, "jumppad", 0.6f * totalTrapRarity, 0.8f * totalTrapRarity);
+			D(c, "jumppad", 0.6f * totalTrapRarity, 0.8f * totalTrapRarity, -0.5f);
 			D(c, "geotree", 2.7f, 3f, 3f, 6f, 0.15f, inGround: false, flip: true, SoilCheck);
 			D(c, "hydreed", 1.4f, 1.6f, 2.6f, 6f, 0.4f, inGround: false, flip: true, SoilCheck);
 			D(c, "leadbush", 2f, 2.2f, 0.6f, 6f, 0.1f, inGround: false, flip: true, SoilCheck);
@@ -1924,25 +1924,25 @@ public static class ChunkStreamer
 			D(c, "sandrose", 1.3f, 1.4f, 1.5f, 10f, 0f, inGround: false, flip: true, SandCheck);
 			D(c, "drybush", 6f, 7f, 2f, 20f, 0f, inGround: false, flip: true, SandCheck);
 			D(c, "brownshroom", 4f, 5f, 0.9f, 10f, 0f, inGround: false, flip: true, SandCheck);
-			D(c, "stalagmite", 10f, 15f, 2.8f, 0f, 0.15f, inGround: false, flip: true, StoneCheck);
-			D(c, "jumppad", 0.25f * totalTrapRarity, 0.35f * totalTrapRarity);
-			D(c, "landmine", 0.13f * totalTrapRarity, 0.16f * totalTrapRarity, 0.4f);
+			D(c, "stalagmite", 10f, 15f, -0.5f, 0f, 0.15f, inGround: false, flip: true, StoneCheck);
+D(c, "jumppad", 0.25f * totalTrapRarity, 0.35f * totalTrapRarity, -0.5f);
+			D(c, "landmine", 0.13f * totalTrapRarity, 0.16f * totalTrapRarity, -0.5f, 0.4f);
 			D(c, "ceilingrye", 0.08f, 0.1f, 1f, 10f, 0.5f, inGround: false, flip: true, SoftCheck, Vector2.up);
 			if (biome == 3)
 			{
 				D(c, "spentfuel", 0.3f * totalTrapRarity, 0.35f * totalTrapRarity, 1.875f);
-				D(c, "soundcannon", 0.4f * totalTrapRarity, 0.45f * totalTrapRarity, 1f);
+				D(c, "soundcannon", 0.4f * totalTrapRarity, 0.45f * totalTrapRarity, -0.5f, 1f);
 				D(c, "foodbox", 0.1f * totalLootRarity, 0.13f * totalLootRarity, 3f, 180f);
 				D(c, "pop", 3f * totalLootRarity, 4f * totalLootRarity, 2f, 20f, 0.2f, inGround: false, flip: true, SandCheck);
-				D(c, "coil", 0.2f * totalTrapRarity, 0.3f * totalTrapRarity, 2f);
+D(c, "coil", 0.2f * totalTrapRarity, 0.3f * totalTrapRarity, -0.5f, 2f);
 			}
 			else
 			{
-				D(c, "wallbiter", 0.12f * totalTrapRarity, 0.13f * totalTrapRarity, 4.8f);
-				D(c, "shadecrawler", 0.2f * totalTrapRarity, 0.2f * totalTrapRarity, 4.8f);
-				D(c, "droppings", 0.75f, 0.82f);
-				D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, 1f);
-				D(c, "barbedwirefence", 0.7f * totalTrapRarity, 0.8f * totalTrapRarity, 4.8f);
+				D(c, "wallbiter", 0.12f * totalTrapRarity, 0.13f * totalTrapRarity, -0.5f, 4.8f);
+				D(c, "shadecrawler", 0.2f * totalTrapRarity, 0.2f * totalTrapRarity, -0.5f, 4.8f);
+				D(c, "droppings", 0.75f, 0.82f, -0.5f);
+D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, -0.5f, 1f);
+				D(c, "barbedwirefence", 0.7f * totalTrapRarity, 0.8f * totalTrapRarity, -0.5f, 4.8f);
 			}
 			D(c, "rag", 0.12f * lootRarityMultiplier * ((biome == 2) ? 1f : 2.5f), 0.2f * lootRarityMultiplier * ((biome == 2) ? 1f : 2.5f), 1f);
 			D(c, "corpse", 0.75f * lootRarityMultiplier * ((biome == 2) ? 1f : 2f), 0.82f * lootRarityMultiplier * ((biome == 2) ? 1f : 2f), 0f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
@@ -1955,14 +1955,14 @@ public static class ChunkStreamer
 			return;
 		}
 		D(c, "glowplant", 0.2f, 0.3f, 1.25f, 10f, 0.25f, inGround: false, flip: true, SoilCheck);
-		D(c, "shadecrawler", 0.45f * totalTrapRarity, 0.5f * totalTrapRarity, 2f, 180f);
-		D(c, "wallbiter", 0.1f * totalTrapRarity, 0.11f * totalTrapRarity, 4.8f);
-		D(c, "thornbackyoung", 0.24f * totalTrapRarity, 0.26f * totalTrapRarity, 4.8f);
-		D(c, "overgrowntick", 0.1f * totalTrapRarity, 0.12f * totalTrapRarity, 4.8f);
-		D(c, "caveticks", 0.15f * totalTrapRarity, 0.16f * totalTrapRarity, 4.8f);
+		D(c, "shadecrawler", 0.45f * totalTrapRarity, 0.5f * totalTrapRarity, -0.5f, 2f, 180f);
+		D(c, "wallbiter", 0.1f * totalTrapRarity, 0.11f * totalTrapRarity, -0.5f, 4.8f);
+		D(c, "thornbackyoung", 0.24f * totalTrapRarity, 0.26f * totalTrapRarity, -0.5f, 4.8f);
+		D(c, "overgrowntick", 0.1f * totalTrapRarity, 0.12f * totalTrapRarity, -0.5f, 4.8f);
+		D(c, "caveticks", 0.15f * totalTrapRarity, 0.16f * totalTrapRarity, -0.5f, 4.8f);
 		if (Random.value < 0.012f)
 		{
-			D(c, "thornbackelder", 1f, 1f);
+			D(c, "thornbackelder", 1f, 1f, -0.5f);
 		}
 		D(c, "stoneplant", 0.4f, 0.5f, 1.9f, 10f, 0.1f, inGround: false, flip: true, SoilCheck);
 		D(c, "ceilingrye", 0.65f, 0.8f, 1f, 10f, 0.5f, inGround: false, flip: true, SoftCheck, Vector2.up);
@@ -1975,14 +1975,14 @@ public static class ChunkStreamer
 		D(c, "browncap", 0.4f, 0.5f, 3f, 6f, 0.15f, inGround: false, flip: true, SoilCheck);
 		D(c, "hydreed", 0.6f, 0.7f, 2.6f, 6f, 0.4f, inGround: false, flip: true, SoilCheck);
 		D(c, "leadbush", 1.1f, 1.2f, 0.6f, 6f, 0.1f, inGround: false, flip: true, SoilCheck);
-		D(c, "droppings", 3.7f, 4f);
+		D(c, "droppings", 3.7f, 4f, -0.5f);
 		D(c, "pop", 1f * totalLootRarity, 1.1f * totalLootRarity, 2f, 20f, 0.2f, inGround: false, flip: true, SoilCheck);
 		D(c, "bananaplant", 1.9f * totalTrapRarity, 2f * totalTrapRarity, 0.4f, 15f, 0.1f, inGround: false, flip: true, SoilCheck);
-		D(c, "coil", 0.2f * totalTrapRarity, 0.3f * totalTrapRarity, 2f);
-		D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, 1f);
-		D(c, "jumppad", 0.25f * totalTrapRarity, 0.35f * totalTrapRarity);
-		D(c, "spikestabber", 0.4f * totalTrapRarity, 0.5f * totalTrapRarity);
-		D(c, "grabberplant", 0.4f * totalTrapRarity, 0.5f * totalTrapRarity);
+		D(c, "coil", 0.2f * totalTrapRarity, 0.3f * totalTrapRarity, -0.5f, 2f);
+		D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, -0.5f, 1f);
+		D(c, "jumppad", 0.25f * totalTrapRarity, 0.35f * totalTrapRarity, -0.5f);
+		D(c, "spikestabber", 0.4f * totalTrapRarity, 0.5f * totalTrapRarity, -0.5f);
+		D(c, "grabberplant", 0.4f * totalTrapRarity, 0.5f * totalTrapRarity, -0.5f);
 		D(c, "geyser", 0.7f, 0.8f, 0.6f, 0f, 0f, inGround: false, flip: false, SoftCheck);
 		D(c, "skullcrusher", 1.1f, 1.2f, 1f, 10f, 0f, inGround: false, flip: true, null, Vector2.up);
 		PlaceSandvine(c, 4f, 5f);
