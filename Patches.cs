@@ -65,6 +65,18 @@ public static class Patches
 		ChunkStreamer.Tick();
 	}
 
+	[HarmonyPatch(typeof(Body), "PlaceBody")]
+	[HarmonyPrefix]
+	private static bool PlaceBody_Prefix(Body __instance)
+	{
+		if (!ChunkStreamer.Active)
+		{
+			return true;
+		}
+		ChunkStreamer.PlaceBodyOverride(__instance);
+		return false;
+	}
+
 	[HarmonyPatch(typeof(WorldGeneration), "Clear")]
 	[HarmonyPostfix]
 	private static void Clear_Postfix()

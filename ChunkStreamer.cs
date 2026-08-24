@@ -215,6 +215,7 @@ public static class ChunkStreamer
 	{
 		W = w;
 		biome = w.biomeDepth;
+		Diag.Log("[CS] terrain init biome=" + biome + " traveled=" + w.totalTraveled + " layers=" + w.amountOfLayers);
 		if (biome <= 1)
 		{
 			caveNoise = NewNoise();
@@ -239,6 +240,7 @@ public static class ChunkStreamer
 			biomeMap.SetCellularJitter(1f);
 			biomeMap.SetFractalType((FractalType)2);
 			biomeMap.SetFractalLacunarity(1.5f);
+			Diag.Log("[CS] noise setup branch=b01");
 		}
 		else if (biome == 2 || biome == 3)
 		{
@@ -284,6 +286,7 @@ public static class ChunkStreamer
 			marbleMap.SetDomainWarpType((DomainWarpType)0);
 			marbleMap.SetDomainWarpAmp(100f);
 			minMarble = ((biome == 2) ? 0.45f : 1f);
+			Diag.Log("[CS] noise setup branch=b23");
 		}
 		else
 		{
@@ -300,6 +303,7 @@ public static class ChunkStreamer
 			biomeMap2.SetFrequency(0.02f);
 			biomeMap2.SetDomainWarpType((DomainWarpType)0);
 			biomeMap2.SetDomainWarpAmp(25f);
+			Diag.Log("[CS] noise setup branch=b4");
 		}
 	}
 
@@ -315,7 +319,10 @@ public static class ChunkStreamer
 		Vector2Int val = new Vector2Int((int)(W.width / 2u) / CS, (int)(W.height / 2u) / CS);
 		PlayerChunk = val;
 		FullDataFill();
-		GenSpawnCavity();
+		if (W.totalTraveled <= 0 && W.debugStartDepth == 0)
+		{
+			GenSpawnCavity();
+		}
 		InvokeGenerateOres();
 		if (StreamOn)
 		{
@@ -357,6 +364,42 @@ public static class ChunkStreamer
 		{
 			Plugin.Log.LogWarning((object)("GenerateOres invoke failed: " + ex));
 		}
+	}
+
+	public static void PlaceBodyOverride(Body body)
+	{
+		ushort[,] wb = WB;
+		int cx = (int)(W.width / 2u);
+		bool sawSky = false;
+		for (int i = 0; i < (int)W.height; i++)
+		{
+			int r = (int)W.height - 1 - i;
+			if (r < 1)
+			{
+				break;
+			}
+			ushort id = wb[cx, r];
+			if (id <= 0 || id == 7)
+			{
+				sawSky = true;
+				continue;
+			}
+			if (!sawSky)
+			{
+				continue;
+			}
+			Vector2 pos = BlockToWorldPos(new Vector2Int(cx, r)) + Vector2.up * 1.05f;
+			body.transform.position = pos;
+			PlayerCamera.main.transform.position = pos;
+			Diag.Log("[CS] PlaceBody override -> (" + pos.x + "," + pos.y + ") row=" + r + " block=" + id);
+			return;
+		}
+		Diag.Log("[CS] PlaceBody override found no surface, falling back to vanilla");
+	}
+
+	private static Vector2 BlockToWorldPos(Vector2Int pos)
+	{
+		return new Vector2((float)pos.x - (float)W.halfWidth + 0.5f, (float)pos.y - (float)W.halfHeight + 0.5f);
 	}
 
 	private static void GenSpawnCavity()
@@ -640,6 +683,14 @@ public static class ChunkStreamer
 					Tilemap val5 = CH[m, n];
 					if (!((Object)(object)val5 == (Object)null))
 					{
+						if (flag2)
+						{
+							FreezeChunkEntities(new Vector2Int(m, n));
+						}
+						else
+						{
+							UnfreezeChunkEntities(new Vector2Int(m, n));
+						}
 						Collider2D[] components = ((Component)val5).GetComponents<Collider2D>();
 						foreach (Collider2D val6 in components)
 						{
@@ -858,6 +909,79 @@ public static class ChunkStreamer
 		//IL_005e: Unknown result type (might be due to invalid IL or missing references)
 		//IL_0061: Unknown result type (might be due to invalid IL or missing references)
 		return new Vector2((float)(c.x * CS - W.halfWidth + Random.Range(10, CS - 10)), (float)(c.y * CS - W.halfHeight + Random.Range(10, CS - 10)));
+	}
+
+	private static readonly Dictionary<Vector2Int, List<Rigidbody2D>> frozenChunkRbs = new Dictionary<Vector2Int, List<Rigidbody2D>>();
+
+	private static bool IsSimulatableLoot(Rigidbody2D rb)
+	{
+		if ((Object)(object)rb == (Object)null || rb.isKinematic || rb.bodyType != RigidbodyType2D.Dynamic)
+		{
+			return false;
+		}
+		string text = ((Object)rb.gameObject).name;
+		if (!text.StartsWith("medcrate") && !text.StartsWith("containercrate") && !text.StartsWith("foodbox"))
+		{
+			return false;
+		}
+		if ((Object)(object)rb.GetComponentInParent<Body>() != (Object)null || (Object)(object)rb.GetComponent<Limb>() != (Object)null)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	private static void FreezeRb(Vector2Int c, Rigidbody2D rb)
+	{
+		rb.simulated = false;
+		rb.velocity = Vector2.zero;
+		rb.angularVelocity = 0f;
+		if (!frozenChunkRbs.TryGetValue(c, out var list))
+		{
+			list = new List<Rigidbody2D>();
+			frozenChunkRbs[c] = list;
+		}
+		if (!list.Contains(rb))
+		{
+			list.Add(rb);
+		}
+	}
+
+	private static void FreezeChunkEntities(Vector2Int c)
+	{
+		try
+		{
+			Vector2 center = W.BlockToWorldPos(new Vector2Int(c.x * CS + CS / 2, c.y * CS + CS / 2));
+			Collider2D[] hits = Physics2D.OverlapBoxAll(center, new Vector2(CS, CS), 0f);
+			foreach (Collider2D hit in hits)
+			{
+				Rigidbody2D rb = hit.attachedRigidbody;
+				if (IsSimulatableLoot(rb) && rb.simulated)
+				{
+					FreezeRb(c, rb);
+				}
+			}
+		}
+		catch (Exception)
+		{
+		}
+	}
+
+	private static void UnfreezeChunkEntities(Vector2Int c)
+	{
+		if (!frozenChunkRbs.TryGetValue(c, out var list))
+		{
+			return;
+		}
+		foreach (Rigidbody2D item in list)
+		{
+			if ((Object)(object)item != (Object)null)
+			{
+				item.simulated = true;
+			}
+		}
+		list.Clear();
+		frozenChunkRbs.Remove(c);
 	}
 
 	private static void RefreshAround(Vector2Int c)
@@ -1867,6 +1991,19 @@ public static class ChunkStreamer
 		diagEntityCount = 0;
 	}
 
+	private static bool HasClearance(int hx, int hy, Vector2 dir)
+	{
+		int signX = (int)Mathf.Sign(dir.x);
+		int signY = (int)Mathf.Sign(dir.y);
+		int bx = hx - signX;
+		int by = hy - signY;
+		if (bx < 0 || by < 0 || bx >= (int)W.width || by >= (int)W.height)
+		{
+			return false;
+		}
+		return WB[bx, by] == 0;
+	}
+
 	private static bool FindSurface(int wx, int wy, Vector2 dir, out int hx, out int hy, int maxDist = 16)
 	{
 		//IL_0008: Unknown result type (might be due to invalid IL or missing references)
@@ -2014,6 +2151,11 @@ public static class ChunkStreamer
 			GameObject val2 = Object.Instantiate<GameObject>(structObj, (Vector2)(place), Quaternion.identity);
 			val2.transform.localScale = new Vector2(0f - num4, 1f);
 			diagEntityCount++;
+			Rigidbody2D spawnRb2 = val2.GetComponent<Rigidbody2D>();
+			if ((Object)(object)spawnRb2 != (Object)null && IsSimulatableLoot(spawnRb2) && !colliderOn[c.x, c.y])
+			{
+				FreezeRb(c, spawnRb2);
+			}
 		}
 	}
 
@@ -2047,9 +2189,13 @@ public static class ChunkStreamer
 			Vector2 top = W.BlockToWorldPos(new Vector2Int(hx, hy));
 			GameObject val2 = Object.Instantiate<GameObject>(structObj, (Vector2)(top + Vector2.down * 2f), Quaternion.identity);
 			val2.GetComponent<BuildingEntity>().blockPlacedOn = new Vector2Int(hx, hy);
-			if (W.ChunkUpdated[c.x, c.y] != null)
 			{
-				W.ChunkUpdated[c.x, c.y].AddListener(new UnityAction(val2.GetComponent<StalactiteDropper>().CheckSeating));
+				int seatX = hx / CS; if (seatX < 0) { seatX = 0; } else if (seatX >= (int)W.chunkWidth) { seatX = (int)(int)W.chunkWidth - 1; }
+				int seatY = hy / CS; if (seatY < 0) { seatY = 0; } else if (seatY >= (int)W.chunkHeight) { seatY = (int)(int)W.chunkHeight - 1; }
+				if (W.ChunkUpdated[seatX, seatY] != null)
+				{
+					W.ChunkUpdated[seatX, seatY].AddListener(new UnityAction(val2.GetComponent<StalactiteDropper>().CheckSeating));
+				}
 			}
 			val2.transform.localScale = new Vector3((Random.Range(0f, 1f) > 0.5f) ? (-1f) : 1f, 1f, 1f);
 			diagEntityCount++;
@@ -2149,24 +2295,47 @@ public static class ChunkStreamer
 			{
 				continue;
 			}
-			GameObject structObj = GetStructObj(name);
-			if ((Object)(object)structObj == (Object)null)
+			int px = hx;
+			int py = hy + 1;
+			if (py >= (int)W.height || WB[px, py] > 0)
 			{
-				Diag.Log("[CE] null-res " + name);
-				continue;
+				for (int adj = 1; adj <= 6; adj++)
+				{
+					if (py + adj < (int)W.height && WB[px, py + adj] == 0)
+					{
+						py += adj;
+						break;
+					}
+					if (py - adj >= 0 && WB[px, py - adj] == 0)
+					{
+						py -= adj;
+						break;
+					}
+				}
 			}
-			Vector2Int place = new Vector2Int(hx - (int)Mathf.Sign(val2.x), hy - (int)Mathf.Sign(val2.y));
+			Vector2Int place = new Vector2Int(px, py);
 			val = W.BlockToWorldPos(place);
+			GameObject structObj = GetStructObj(name);
 			float num7 = Random.Range(yOff - yDev, yOff + yDev);
 			GameObject val3 = Object.Instantiate<GameObject>(structObj, (Vector2)(val - val2 * num7), Quaternion.Euler(0f, 0f, Random.Range(0f - rot, rot)));
 			diagEntityCount++;
+			Rigidbody2D spawnRb = val3.GetComponent<Rigidbody2D>();
+			if ((Object)(object)spawnRb != (Object)null && IsSimulatableLoot(spawnRb) && !colliderOn[c.x, c.y])
+			{
+				FreezeRb(c, spawnRb);
+			}
 			BuildingEntity component = val3.GetComponent<BuildingEntity>();
 			if ((Object)(object)component != (Object)null)
 			{
 				component.blockPlacedOn = new Vector2Int(hx, hy);
-				if (inGround && W.ChunkUpdated[c.x, c.y] != null)
+				if (component.requireGround)
 				{
-					W.ChunkUpdated[c.x, c.y].AddListener(new UnityAction(component.CheckSeating));
+					int seatX = hx / CS; if (seatX < 0) { seatX = 0; } else if (seatX >= (int)W.chunkWidth) { seatX = (int)(int)W.chunkWidth - 1; }
+					int seatY = hy / CS; if (seatY < 0) { seatY = 0; } else if (seatY >= (int)W.chunkHeight) { seatY = (int)(int)W.chunkHeight - 1; }
+					if (W.ChunkUpdated[seatX, seatY] != null)
+					{
+						W.ChunkUpdated[seatX, seatY].AddListener(new UnityAction(component.CheckSeating));
+					}
 				}
 			}
 			if (flip && Random.value < 0.5f)
