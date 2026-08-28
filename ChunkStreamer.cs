@@ -319,10 +319,7 @@ public static class ChunkStreamer
 		Vector2Int val = new Vector2Int((int)(W.width / 2u) / CS, (int)(W.height / 2u) / CS);
 		PlayerChunk = val;
 		FullDataFill();
-		if (W.totalTraveled <= 0 && W.debugStartDepth == 0)
-		{
-			GenSpawnCavity();
-		}
+		GenSpawnCavity();
 		InvokeGenerateOres();
 		if (StreamOn)
 		{
@@ -408,27 +405,35 @@ public static class ChunkStreamer
 		{
 			return;
 		}
-		for (int j = 508; j <= 516; j++)
+		int cx = (int)(W.width / 2u);
+		int floor = (int)(W.height - 1u) - 13;
+		int half = 4;
+		int floorTop = floor + 12;
+		if (cx - half - 1 < 0 || floor < 1 || floorTop + 1 >= (int)W.height)
 		{
-			for (int k = 1012; k <= 1022; k++)
+			return;
+		}
+		for (int j = cx - half; j <= cx + half; j++)
+		{
+			for (int k = floor + 1; k <= floorTop; k++)
 			{
 				WB[j, k] = 0;
 			}
-			WB[j, 1011] = 1;
-			WB[j, 1023] = 0;
+			WB[j, floor] = 1;
+			WB[j, floorTop + 1] = 0;
 		}
-		for (int l = 506; l <= 518; l++)
+		for (int l = cx - half - 1; l <= cx + half + 1; l++)
 		{
-			WB[l, 1023] = 0;
+			WB[l, floorTop + 1] = 0;
 		}
-		int col0 = 508 / CS;
-		int col1 = 516 / CS;
-		int row = 1011 / CS;
+		int col0 = (cx - half) / CS;
+		int col1 = (cx + half) / CS;
+		int row = floor / CS;
 		for (int m = col0; m <= col1; m++)
 		{
 			SyncApplySpawnChunk(new Vector2Int(m, row));
 		}
-		Plugin.Log.LogInfo((object)"CS: spawn cavity carved into worldBlocks");
+		Plugin.Log.LogInfo((object)("CS: spawn cavity carved, W=" + W.width + "x" + W.height + " hw=" + W.halfWidth + " hh=" + W.halfHeight + " cx=" + cx + " floor=" + floor + " topRow=" + (W.height - 1)));
 	}
 
 	private static void SyncApplySpawnChunk(Vector2Int cc)

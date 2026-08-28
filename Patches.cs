@@ -2,12 +2,39 @@ using System;
 using System.Collections.Generic;
 using HarmonyLib;
 using UnityEngine;
+using UnityObject = UnityEngine.Object;
 
 namespace GlassM;
 
 public static class Patches
 {
 	public static readonly List<string> Report = new List<string>();
+
+	private static float lastDarkenTime = float.MinValue;
+
+	[HarmonyPatch(typeof(GlobalDark), "Darken")]
+	[HarmonyPostfix]
+	private static void Darken_Postfix()
+	{
+		lastDarkenTime = Time.realtimeSinceStartup;
+	}
+
+	[HarmonyPatch(typeof(GlobalDark), "IsDarkening")]
+	[HarmonyPrefix]
+	private static bool IsDarkening_Prefix(ref bool __result)
+	{
+		if ((UnityObject)(object)GlobalDark.main == (UnityObject)null)
+		{
+			__result = false;
+			return false;
+		}
+		if (Time.realtimeSinceStartup - lastDarkenTime > 3f)
+		{
+			__result = false;
+			return false;
+		}
+		return true;
+	}
 	[HarmonyPatch(typeof(WorldGeneration), "WorldGenerateTerrain")]
 	[HarmonyPrefix]
 	private static bool WorldGenerateTerrain_Prefix(WorldGeneration __instance)
@@ -17,13 +44,43 @@ public static class Patches
 			Plugin.Log.LogInfo((object)("CS: override scene " + (object)__instance.biomeOverride + ", vanilla pipeline"));
 			ChunkStreamer.Active = false;
 			ChunkStreamer.OnClear();
+			Plugin.Log.LogInfo((object)("CS: override cleared, returning true, biomeOverride=" + (object)__instance.biomeOverride));
 			return true;
 		}
-		Plugin.Log.LogInfo((object)("CS: WorldGenerateTerrain intercepted, biome=" + __instance.biomeDepth));
-		ChunkStreamer.OnNewWorld(__instance);
-		ChunkStreamer.InitTerrain(__instance);
-		ChunkStreamer.GenerateInitial();
-		Plugin.Log.LogInfo((object)("CS: initial gen done, queue=" + ChunkStreamer.QueueCount));
+		Plugin.Log.LogInfo((object)("CS: normal mode biome=" + __instance.biomeDepth));
+		try
+		{
+			Plugin.Log.LogInfo((object)"CS: calling OnNewWorld");
+			ChunkStreamer.OnNewWorld(__instance);
+			Plugin.Log.LogInfo((object)"CS: OnNewWorld done");
+		}
+		catch (Exception ex2)
+		{
+			Plugin.Log.LogError((object)("CS: OnNewWorld failed: " + ex2));
+			return false;
+		}
+		try
+		{
+			Plugin.Log.LogInfo((object)"CS: calling InitTerrain");
+			ChunkStreamer.InitTerrain(__instance);
+			Plugin.Log.LogInfo((object)"CS: InitTerrain done");
+		}
+		catch (Exception ex3)
+		{
+			Plugin.Log.LogError((object)("CS: InitTerrain failed: " + ex3));
+			return false;
+		}
+		try
+		{
+			Plugin.Log.LogInfo((object)"CS: calling GenerateInitial");
+			ChunkStreamer.GenerateInitial();
+			Plugin.Log.LogInfo((object)("CS: GenerateInitial done, queue=" + ChunkStreamer.QueueCount));
+		}
+		catch (Exception ex4)
+		{
+			Plugin.Log.LogError((object)("CS: GenerateInitial failed: " + ex4));
+			return false;
+		}
 		return false;
 	}
 
@@ -31,6 +88,7 @@ public static class Patches
 	[HarmonyPrefix]
 	private static bool UpdateWorld_Prefix()
 	{
+		Plugin.Log.LogInfo((object)("CS: UpdateWorld called, Active=" + ChunkStreamer.Active));
 		if (!ChunkStreamer.Active)
 		{
 			return true;
@@ -43,6 +101,7 @@ public static class Patches
 	[HarmonyPrefix]
 	private static bool WorldPlaceEntities_Prefix()
 	{
+		Plugin.Log.LogInfo((object)("CS: WorldPlaceEntities called, Active=" + ChunkStreamer.Active));
 		if (!ChunkStreamer.Active)
 		{
 			return true;
