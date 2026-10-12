@@ -1,5 +1,7 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using HarmonyLib;
 using UnityEngine;
 using UnityObject = UnityEngine.Object;
@@ -11,6 +13,33 @@ public static class Patches
 	public static readonly List<string> Report = new List<string>();
 
 	private static float lastDarkenTime = float.MinValue;
+
+	private static Func<bool> mpRunningCheck;
+
+	private static bool mpCheckDone;
+
+	private static bool IsMultiplayerRunning()
+	{
+		if (mpCheckDone)
+		{
+			return mpRunningCheck != null && mpRunningCheck();
+		}
+		mpCheckDone = true;
+		try
+		{
+			var asm = AppDomain.CurrentDomain.GetAssemblies()
+				.FirstOrDefault(a => a.GetName().Name == "KrokoshaCasualtiesMP");
+			if (asm == null) return false;
+			var t = asm.GetType("KrokoshaCasualtiesMP.KrokoshaScavMultiplayer");
+			if (t == null) return false;
+			var f = t.GetField("network_system_is_running",
+				System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+			if (f == null || f.FieldType != typeof(bool)) return false;
+			mpRunningCheck = () => (bool)f.GetValue(null);
+			return mpRunningCheck();
+		}
+		catch { return false; }
+	}
 
 	[HarmonyPatch(typeof(GlobalDark), "Darken")]
 	[HarmonyPostfix]
@@ -37,7 +66,7 @@ public static class Patches
 	}
 	[HarmonyPatch(typeof(WorldGeneration), "WorldGenerateTerrain")]
 	[HarmonyPrefix]
-	private static bool WorldGenerateTerrain_Prefix(WorldGeneration __instance)
+	private static bool WorldGenerateTerrain_Prefix(WorldGeneration __instance, ref IEnumerator __result)
 	{
 		if ((int)__instance.biomeOverride > 0)
 		{
@@ -57,6 +86,7 @@ public static class Patches
 		catch (Exception ex2)
 		{
 			Plugin.Log.LogError((object)("CS: OnNewWorld failed: " + ex2));
+			__result = EmptyCoroutine();
 			return false;
 		}
 		try
@@ -68,6 +98,7 @@ public static class Patches
 		catch (Exception ex3)
 		{
 			Plugin.Log.LogError((object)("CS: InitTerrain failed: " + ex3));
+			__result = EmptyCoroutine();
 			return false;
 		}
 		try
@@ -79,9 +110,16 @@ public static class Patches
 		catch (Exception ex4)
 		{
 			Plugin.Log.LogError((object)("CS: GenerateInitial failed: " + ex4));
+			__result = EmptyCoroutine();
 			return false;
 		}
+		__result = EmptyCoroutine();
 		return false;
+	}
+
+	private static IEnumerator EmptyCoroutine()
+	{
+		yield break;
 	}
 
 	[HarmonyPatch(typeof(WorldGeneration), "UpdateWorld")]
@@ -99,7 +137,7 @@ public static class Patches
 
 	[HarmonyPatch(typeof(WorldGeneration), "WorldPlaceEntities")]
 	[HarmonyPrefix]
-	private static bool WorldPlaceEntities_Prefix()
+	private static bool WorldPlaceEntities_Prefix(ref IEnumerator __result)
 	{
 		Plugin.Log.LogInfo((object)("CS: WorldPlaceEntities called, Active=" + ChunkStreamer.Active));
 		if (!ChunkStreamer.Active)
@@ -107,6 +145,7 @@ public static class Patches
 			return true;
 		}
 		Plugin.Log.LogInfo((object)"CS: WorldPlaceEntities skipped");
+		__result = EmptyCoroutine();
 		return false;
 	}
 
@@ -129,6 +168,10 @@ public static class Patches
 	private static bool PlaceBody_Prefix(Body __instance)
 	{
 		if (!ChunkStreamer.Active)
+		{
+			return true;
+		}
+		if (IsMultiplayerRunning())
 		{
 			return true;
 		}

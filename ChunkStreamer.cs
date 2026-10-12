@@ -1163,7 +1163,6 @@ public static class ChunkStreamer
 		Object.Instantiate<GameObject>(GetStructObj("dropcapsule"), (Vector2)(val), Quaternion.Euler(0f, 0f, Random.Range(0f, 360f))).GetComponent<AudioSource>().pitch = Random.Range(0.9f, 1.1f);
 		W.GenerateBlockCircle(val, 32, (ushort)3, 0.7f, 0f, false, false, false);
 		W.GenerateBlockCircle(val, 30, (ushort)6, 0.04f, 0.04f, false, false, false);
-		W.GenerateBlockCircle(val, 4, (ushort)0, 1f, 0.9f, false, false, false);
 	}
 
 	private static void CollapsedPodAt(Vector2Int c)
@@ -1435,7 +1434,6 @@ public static class ChunkStreamer
 			}
 			W.GenerateBlockCircle(val, 16, (ushort)3, 0.8f, 0f, false, false, false);
 			W.GenerateBlockCircle(val, 20, (ushort)4, 0.3f, 0f, false, false, false);
-			W.GenerateBlockCircle(val, 16, (ushort)0, 0.15f, 0f, false, false, false);
 			structPlaced = true;
 		W.GenerateObjectAtPos(ground, ((Component)GetStruct("BioContainer").transform.GetChild(0)).GetComponent<Tilemap>(), chance, true);
 			W.GenerateEntityAtPos(W.BlockToWorldPos(ground), GetStruct("BioContainer"));
@@ -1900,11 +1898,11 @@ D(c, "spikestabber", 0.4f * totalTrapRarity, 0.5f * totalTrapRarity, -0.5f);
 				D(c, "barbedwirefence", 0.6f * totalTrapRarity, 0.8f * totalTrapRarity, -0.5f, 4.8f);
 				D(c, "beartrap", 0.2f * totalTrapRarity, 0.25f * totalTrapRarity, -0.5f, 1f);
 				D(c, "CaveTicks", 0.15f * totalTrapRarity, 0.2f * totalTrapRarity, -0.5f, 0f, 3f);
-				D(c, "geyser", 1.6f, 1.8f, 0.6f, 0f, 0f, inGround: false, flip: false, SoftCheck);
+				D(c, "geyser", 1.6f, 1.8f, -0.5f, 0f, 0f, inGround: false, flip: false, SoftCheck);
 			}
 			else
 			{
-				D(c, "geyser", 0.7f, 0.8f, 0.6f, 0f, 0f, inGround: false, flip: false, SoftCheck);
+				D(c, "geyser", 0.7f, 0.8f, -0.5f, 0f, 0f, inGround: false, flip: false, SoftCheck);
 			}
 			D(c, "jumppad", 0.6f * totalTrapRarity, 0.8f * totalTrapRarity, -0.5f);
 			D(c, "geotree", 2.7f, 3f, 3f, 6f, 0.15f, inGround: false, flip: true, SoilCheck);
@@ -2323,6 +2321,10 @@ D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, -0.5f, 1f);
 			GameObject structObj = GetStructObj(name);
 			float num7 = Random.Range(yOff - yDev, yOff + yDev);
 			GameObject val3 = Object.Instantiate<GameObject>(structObj, (Vector2)(val - val2 * num7), Quaternion.Euler(0f, 0f, Random.Range(0f - rot, rot)));
+			if (name == "geyser")
+			{
+				Plugin.Log.LogInfo((object)("[CS] geyser placed at " + (Vector2)(val - val2 * num7) + " (blockCenter=" + val + " yOff=" + num7 + " dir=" + val2 + " hx=" + hx + " hy=" + hy + ")"));
+			}
 			diagEntityCount++;
 			Rigidbody2D spawnRb = val3.GetComponent<Rigidbody2D>();
 			if ((Object)(object)spawnRb != (Object)null && IsSimulatableLoot(spawnRb) && !colliderOn[c.x, c.y])
