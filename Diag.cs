@@ -101,6 +101,7 @@ namespace GlassM
 #else
 		public static void Log(string line)
 		{
+			Plugin.Log.LogInfo(line);
 		}
 
 		public static void LogToGameConsole(string text)
