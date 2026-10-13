@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Reflection;
 using System.Threading;
 using BepInEx.Logging;
@@ -70,21 +69,7 @@ public static class ChunkStreamer
 
 	private static readonly Dictionary<string, GameObject> structRes = new Dictionary<string, GameObject>();
 
-	private static long diagApplyMs;
-
-	private static long diagRenderMs;
-
-	private static long diagStructMs;
-
-	private static long diagRefreshMs;
-
-	private static long diagOreMs;
-
-	private static int diagApplyCount;
-
-	private static int diagEntityCount;
-
-	private static bool structPlaced;
+	private static int diagEntityCount;	private static bool structPlaced;
 
 	private static readonly List<Vector2Int> mpPlayerChunks = new List<Vector2Int>();
 
@@ -116,16 +101,6 @@ public static class ChunkStreamer
 
 	private static Vector2Int moveDir;
 
-	private static int diagTickCount;
-
-	private static int diagGenCount;
-
-	private static int diagRenderCount;
-
-	private static int diagRenderFixed;
-
-	private static float diagLastLogTime;
-	private static float diagBlockLogTime;
 	private static int lastTickFrame = -1;
 
 	public static readonly bool StreamOn = true;
@@ -179,12 +154,12 @@ public static class ChunkStreamer
 	{
 		W = w;
 		Active = true;
-		Diag.Log("[CSDIAG] new world w=" + w.width + " h=" + w.height + " biome=" + w.biomeDepth + " fwb=" + (f_worldBlocks != null) + " fch=" + (f_chunks != null));
+		Plugin.Diag("[CS] new world w=" + w.width + " h=" + w.height + " biome=" + w.biomeDepth + " fwb=" + (f_worldBlocks != null) + " fch=" + (f_chunks != null));
 		foreach (string r in Patches.Report)
 		{
-			Diag.Log("[CSDIAG] " + r);
+			Plugin.Diag("[CS] " + r);
 		}
-		Diag.Log("[CSDIAG] report end, patches=" + Patches.Report.Count);
+		Plugin.Diag("[CS] report end, patches=" + Patches.Report.Count);
 		Array.Clear(genData, 0, genData.Length);
 		Array.Clear(colliderOn, 0, colliderOn.Length);
 		Array.Clear(inQueue, 0, inQueue.Length);
@@ -192,6 +167,7 @@ public static class ChunkStreamer
 		Array.Clear(genApplied, 0, genApplied.Length);
 		Array.Clear(dirtyRender, 0, dirtyRender.Length);
 		queue.Clear();
+		frozenChunkRbs.Clear();
 	}
 
 	public static void OnClear()
@@ -204,6 +180,7 @@ public static class ChunkStreamer
 		Array.Clear(dirtyRender, 0, dirtyRender.Length);
 		queue.Clear();
 		pendingFull.Clear();
+		frozenChunkRbs.Clear();
 	}
 
 	private static bool InWorld(Vector2Int c)
@@ -215,7 +192,7 @@ public static class ChunkStreamer
 	{
 		W = w;
 		biome = w.biomeDepth;
-		Diag.Log("[CS] terrain init biome=" + biome + " traveled=" + w.totalTraveled + " layers=" + w.amountOfLayers);
+		Plugin.Diag("[CS] terrain init biome=" + biome + " traveled=" + w.totalTraveled + " layers=" + w.amountOfLayers);
 		if (biome <= 1)
 		{
 			caveNoise = NewNoise();
@@ -240,7 +217,7 @@ public static class ChunkStreamer
 			biomeMap.SetCellularJitter(1f);
 			biomeMap.SetFractalType((FractalType)2);
 			biomeMap.SetFractalLacunarity(1.5f);
-			Diag.Log("[CS] noise setup branch=b01");
+			Plugin.Diag("[CS] noise setup branch=b01");
 		}
 		else if (biome == 2 || biome == 3)
 		{
@@ -286,7 +263,7 @@ public static class ChunkStreamer
 			marbleMap.SetDomainWarpType((DomainWarpType)0);
 			marbleMap.SetDomainWarpAmp(100f);
 			minMarble = ((biome == 2) ? 0.45f : 1f);
-			Diag.Log("[CS] noise setup branch=b23");
+			Plugin.Diag("[CS] noise setup branch=b23");
 		}
 		else
 		{
@@ -303,7 +280,7 @@ public static class ChunkStreamer
 			biomeMap2.SetFrequency(0.02f);
 			biomeMap2.SetDomainWarpType((DomainWarpType)0);
 			biomeMap2.SetDomainWarpAmp(25f);
-			Diag.Log("[CS] noise setup branch=b4");
+			Plugin.Diag("[CS] noise setup branch=b4");
 		}
 	}
 
@@ -329,7 +306,6 @@ public static class ChunkStreamer
 
 	private static void FullDataFill()
 	{
-		Stopwatch stopwatch = Stopwatch.StartNew();
 		ushort[,] array = new ushort[CS, CS];
 		for (int i = 0; i < 16; i++)
 		{
@@ -347,7 +323,7 @@ public static class ChunkStreamer
 				}
 			}
 		}
-		Diag.Log("[CSDIAG] full data fill done in " + stopwatch.ElapsedMilliseconds + "ms");
+		Plugin.Diag("[CS] full data fill done");
 	}
 
 	private static void InvokeGenerateOres()
@@ -355,7 +331,7 @@ public static class ChunkStreamer
 		try
 		{
 			m_generateOres?.Invoke(W, null);
-			Diag.Log("[CSDIAG] GenerateOres invoked (vanilla ores + mod hooks)");
+			Plugin.Diag("[CS] GenerateOres invoked (vanilla ores + mod hooks)");
 		}
 		catch (Exception ex)
 		{
@@ -388,10 +364,10 @@ public static class ChunkStreamer
 			Vector2 pos = BlockToWorldPos(new Vector2Int(cx, r)) + Vector2.up * 1.05f;
 			body.transform.position = pos;
 			PlayerCamera.main.transform.position = pos;
-			Diag.Log("[CS] PlaceBody override -> (" + pos.x + "," + pos.y + ") row=" + r + " block=" + id);
+			Plugin.Diag("[CS] PlaceBody override -> (" + pos.x + "," + pos.y + ") row=" + r + " block=" + id);
 			return;
 		}
-		Diag.Log("[CS] PlaceBody override found no surface, falling back to vanilla");
+		Plugin.Diag("[CS] PlaceBody override found no surface, falling back to vanilla");
 	}
 
 	private static Vector2 BlockToWorldPos(Vector2Int pos)
@@ -433,7 +409,7 @@ public static class ChunkStreamer
 		{
 			SyncApplySpawnChunk(new Vector2Int(m, row));
 		}
-		Plugin.Log.LogInfo((object)("CS: spawn cavity carved, W=" + W.width + "x" + W.height + " hw=" + W.halfWidth + " hh=" + W.halfHeight + " cx=" + cx + " floor=" + floor + " topRow=" + (W.height - 1)));
+		Plugin.Diag((object)("CS: spawn cavity carved, W=" + W.width + "x" + W.height + " hw=" + W.halfWidth + " hh=" + W.halfHeight + " cx=" + cx + " floor=" + floor + " topRow=" + (W.height - 1)));
 	}
 
 	private static void SyncApplySpawnChunk(Vector2Int cc)
@@ -574,12 +550,6 @@ public static class ChunkStreamer
 		}
 		if (!Active || (Object)(object)W == (Object)null || !wbOk || !chOk)
 		{
-			if (Time.realtimeSinceStartup - diagBlockLogTime > 5f)
-			{
-				diagBlockLogTime = Time.realtimeSinceStartup;
-				string wState = ((Object)(object)W == (Object)null) ? "0" : "1";
-				Diag.Log("[CSDIAG] tick blocked Active=" + (Active ? 1 : 0) + " W=" + wState + " WB=" + (wbOk ? 1 : 0) + " CH=" + (chOk ? 1 : 0));
-			}
 			return;
 		}
 		if (Time.fixedDeltaTime != 0.03f)
@@ -723,40 +693,8 @@ public static class ChunkStreamer
 				if (m2 >= 0 && n2 >= 0 && m2 < 16 && n2 < 16 && dirtyRender[m2, n2] && genApplied[m2, n2])
 				{
 					RenderChunk(new Vector2Int(m2, n2));
-					diagRenderFixed++;
 				}
 			}
-		}
-		diagTickCount++;
-		if (Time.realtimeSinceStartup - diagLastLogTime > 5f)
-		{
-			diagLastLogTime = Time.realtimeSinceStartup;
-			int dirtyTotal = 0;
-			for (int m3 = 0; m3 < 16; m3++)
-			{
-				for (int n3 = 0; n3 < 16; n3++)
-				{
-					if (dirtyRender[m3, n3])
-					{
-						dirtyTotal++;
-					}
-				}
-			}
-			string diagLine = string.Concat(new object[]
-			{
-				"[CSDIAG] ticks=", diagTickCount, " plrs=", mpPlayerChunks.Count, " pc=", pc, " q=", queue.Count, " pf=", pendingFull.Count, " gen=", diagGenCount, " ren=", diagRenderCount, " fix=", diagRenderFixed, " dirty=", dirtyTotal, " colFlip=", num3, " ore=", diagOreMs, "ms ren=", diagRenderMs, "ms struct=", diagStructMs, "ms refresh=", diagRefreshMs, "ms apply=", diagApplyMs, "ms"
-			});
-			Diag.Log(diagLine);
-			diagTickCount = 0;
-			diagGenCount = 0;
-			diagRenderCount = 0;
-			diagRenderFixed = 0;
-			diagOreMs = 0L;
-			diagRenderMs = 0L;
-			diagStructMs = 0L;
-			diagRefreshMs = 0L;
-			diagApplyMs = 0L;
-			diagApplyCount = 0;
 		}
 	}
 
@@ -793,7 +731,6 @@ public static class ChunkStreamer
 		genFull[c.x, c.y] = full;
 		inQueue[c.x, c.y] = false;
 		ApplyChunk(c);
-		diagGenCount++;
 	}
 
 	private static void ApplyChunk(Vector2Int c)
@@ -803,10 +740,8 @@ public static class ChunkStreamer
 			return;
 		}
 		genApplied[c.x, c.y] = true;
-		Stopwatch stopwatch = Stopwatch.StartNew();
 		try
 		{
-			Stopwatch stopwatch2 = Stopwatch.StartNew();
 			if (genFull[c.x, c.y])
 			{
 				GenChunkLiquids(c);
@@ -816,21 +751,12 @@ public static class ChunkStreamer
 			{
 				pendingFull.Add(c);
 			}
-			diagOreMs += stopwatch2.ElapsedMilliseconds;
-			Stopwatch stopwatch3 = Stopwatch.StartNew();
 			RenderChunk(c);
-			diagRenderMs += stopwatch3.ElapsedMilliseconds;
-			Stopwatch stopwatch4 = Stopwatch.StartNew();
 			bool flagStruct = GenChunkStructures(c);
-			diagStructMs += stopwatch4.ElapsedMilliseconds;
-			Stopwatch stopwatch5 = Stopwatch.StartNew();
 			if (flagStruct)
 			{
 				RefreshAround(c);
 			}
-			diagRefreshMs += stopwatch5.ElapsedMilliseconds;
-			diagApplyMs += stopwatch.ElapsedMilliseconds;
-			diagApplyCount++;
 		}
 		catch (Exception ex)
 		{
@@ -849,7 +775,6 @@ public static class ChunkStreamer
 		{
 			return;
 		}
-		diagRenderCount++;
 		int num = c.x * CS;
 		int num2 = c.y * CS;
 		int hALFCHUNKSIZE = W.HALFCHUNKSIZE;
@@ -1660,7 +1585,7 @@ public static class ChunkStreamer
 
 	private static void GenChunkEntities(Vector2Int c)
 	{
-		Diag.Log("[CE] start c=(" + c.x + "," + c.y + ") biome=" + biome);
+		Plugin.Diag("[CE] start c=(" + c.x + "," + c.y + ") biome=" + biome);
 		//IL_0039: Unknown result type (might be due to invalid IL or missing references)
 		//IL_006b: Unknown result type (might be due to invalid IL or missing references)
 		//IL_0071: Unknown result type (might be due to invalid IL or missing references)
@@ -1890,9 +1815,9 @@ public static class ChunkStreamer
 			D(c, "foodbox", 0.1f * totalLootRarity, 0.13f * totalLootRarity, 3f, 180f);
 D(c, "spikestabber", 0.4f * totalTrapRarity, 0.5f * totalTrapRarity, -0.5f);
 			D(c, "shadecrawler", 0.4f * totalTrapRarity, 0.42f * totalTrapRarity, -0.5f, 2f, 180f);
-			D(c, "corpse", 1f * lootRarityMultiplier, 1.1f * lootRarityMultiplier, 0f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
-			D(c, "animalcorpse", 0.6f * lootRarityMultiplier, 0.7f * lootRarityMultiplier, 0f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
-			D(c, "drillpod", 0.09f, 0.1f, 0f, 0f, 0f, inGround: true, flip: true);
+			D(c, "corpse", 1f * lootRarityMultiplier, 1.1f * lootRarityMultiplier, -0.5f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
+			D(c, "animalcorpse", 0.6f * lootRarityMultiplier, 0.7f * lootRarityMultiplier, -0.5f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
+			D(c, "drillpod", 0.09f, 0.1f, -0.5f, 0f, 0f, inGround: true, flip: true);
 			if (biome > 0)
 			{
 				D(c, "barbedwirefence", 0.6f * totalTrapRarity, 0.8f * totalTrapRarity, -0.5f, 4.8f);
@@ -1914,7 +1839,7 @@ D(c, "spikestabber", 0.4f * totalTrapRarity, 0.5f * totalTrapRarity, -0.5f);
 			{
 				DistributeLoose(c, "fleshchunk", 0.015f * totalLootRarity, 0.02f * totalLootRarity, true, Vector2.down, true, false);
 			}
-			Diag.Log("[CE] done b0 c=(" + c.x + "," + c.y + ") placed=" + diagEntityCount);
+			Plugin.Diag("[CE] done b0 c=(" + c.x + "," + c.y + ") placed=" + diagEntityCount);
 			diagEntityCount = 0;
 			return;
 		}
@@ -1948,12 +1873,12 @@ D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, -0.5f, 1f);
 				D(c, "barbedwirefence", 0.7f * totalTrapRarity, 0.8f * totalTrapRarity, -0.5f, 4.8f);
 			}
 			D(c, "rag", 0.12f * lootRarityMultiplier * ((biome == 2) ? 1f : 2.5f), 0.2f * lootRarityMultiplier * ((biome == 2) ? 1f : 2.5f), 1f);
-			D(c, "corpse", 0.75f * lootRarityMultiplier * ((biome == 2) ? 1f : 2f), 0.82f * lootRarityMultiplier * ((biome == 2) ? 1f : 2f), 0f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
+			D(c, "corpse", 0.75f * lootRarityMultiplier * ((biome == 2) ? 1f : 2f), 0.82f * lootRarityMultiplier * ((biome == 2) ? 1f : 2f), -0.5f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
 			DistributeLoose(c, "oilpipe", 0.3f, 0.4f, false, Vector2.down, true, false);
 			PlaceTurret(c, 0.12f * totalTrapRarity * ((biome == 2) ? 1f : 0.66f), 0.15f * totalTrapRarity * ((biome == 2) ? 1f : 0.66f));
 			PlaceStalactite(c, 1.5f * totalTrapRarity, 2f * totalTrapRarity);
 			PlaceSandvine(c, 6f * ((biome == 2) ? 1f : 0.1f), 7f * ((biome == 2) ? 1f : 0.1f));
-			Diag.Log("[CE] done b23 c=(" + c.x + "," + c.y + ") placed=" + diagEntityCount);
+			Plugin.Diag("[CE] done b23 c=(" + c.x + "," + c.y + ") placed=" + diagEntityCount);
 			diagEntityCount = 0;
 			return;
 		}
@@ -1972,8 +1897,8 @@ D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, -0.5f, 1f);
 		D(c, "medcrate", 0.18f * totalLootRarity, 0.2f * totalLootRarity, 3f, 180f);
 		D(c, "containercrate", 0.05f * totalLootRarity, 0.07f * totalLootRarity, 3f, 180f);
 		D(c, "foodbox", 0.1f * totalLootRarity, 0.13f * totalLootRarity, 3f, 180f);
-		D(c, "corpse", 1.1f * lootRarityMultiplier, 1.2f * lootRarityMultiplier, 0f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
-		D(c, "animalcorpse", 0.9f * lootRarityMultiplier, 0.95f * lootRarityMultiplier, 0f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
+		D(c, "corpse", 1.1f * lootRarityMultiplier, 1.2f * lootRarityMultiplier, -0.5f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
+		D(c, "animalcorpse", 0.9f * lootRarityMultiplier, 0.95f * lootRarityMultiplier, -0.5f, 0f, 0f, inGround: false, flip: false, CorpseCheck);
 		D(c, "geotree", 0.4f, 0.5f, 3f, 6f, 0.15f, inGround: false, flip: true, SoilCheck);
 		D(c, "browncap", 0.4f, 0.5f, 3f, 6f, 0.15f, inGround: false, flip: true, SoilCheck);
 		D(c, "hydreed", 0.6f, 0.7f, 2.6f, 6f, 0.4f, inGround: false, flip: true, SoilCheck);
@@ -1990,7 +1915,7 @@ D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, -0.5f, 1f);
 		D(c, "skullcrusher", 1.1f, 1.2f, 1f, 10f, 0f, inGround: false, flip: true, null, Vector2.up);
 		PlaceSandvine(c, 4f, 5f);
 		DistributeLoose(c, "wallflower", 6f, 7f, false, Vector2.down, true, false);
-		Diag.Log("[CE] done bX c=(" + c.x + "," + c.y + ") placed=" + diagEntityCount);
+		Plugin.Diag("[CE] done bX c=(" + c.x + "," + c.y + ") placed=" + diagEntityCount);
 		diagEntityCount = 0;
 	}
 
@@ -2098,11 +2023,15 @@ D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, -0.5f, 1f);
 			GameObject structObj = GetStructObj(name);
 			if ((Object)(object)structObj == (Object)null)
 			{
-				Diag.Log("[CE] null-res " + name);
+				Plugin.Diag("[CE] null-res " + name);
 				continue;
 			}
 			Vector2 vector = W.BlockToWorldPos(new Vector2Int(hx, hy));
 			GameObject val2 = Object.Instantiate<GameObject>(structObj, (Vector2)(vector), Quaternion.Euler(0f, 0f, rotate ? Random.Range(-180f, 180f) : 0f));
+		if ((Object)(object)W.worldGrid != (Object)null)
+		{
+			val2.transform.SetParent(W.worldGrid.transform, worldPositionStays: true);
+		}
 			diagEntityCount++;
 			if (setCondition)
 			{
@@ -2147,7 +2076,7 @@ D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, -0.5f, 1f);
 			GameObject structObj = GetStructObj("turret");
 			if ((Object)(object)structObj == (Object)null)
 			{
-				Diag.Log("[CE] null-res turret");
+				Plugin.Diag("[CE] null-res turret");
 				continue;
 			}
 			Vector2 place = W.BlockToWorldPos(new Vector2Int(hx - (int)num4, hy));
@@ -2186,7 +2115,7 @@ D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, -0.5f, 1f);
 			GameObject structObj = GetStructObj("stalactite");
 			if ((Object)(object)structObj == (Object)null)
 			{
-				Diag.Log("[CE] null-res stalactite");
+				Plugin.Diag("[CE] null-res stalactite");
 				continue;
 			}
 			Vector2 top = W.BlockToWorldPos(new Vector2Int(hx, hy));
@@ -2236,7 +2165,7 @@ D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, -0.5f, 1f);
 			GameObject structObj2 = GetStructObj("Special/sandvinerope");
 			if ((Object)(object)structObj == (Object)null || (Object)(object)structObj2 == (Object)null)
 			{
-				Diag.Log("[CE] null-res sandvine");
+				Plugin.Diag("[CE] null-res sandvine");
 				continue;
 			}
 			Vector2 top = W.BlockToWorldPos(new Vector2Int(hx1, hy1 - 1));
@@ -2298,6 +2227,10 @@ D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, -0.5f, 1f);
 			{
 				continue;
 			}
+			if (val2.y < 0f && hy + 1 < (int)W.height && WB[hx, hy + 1] != 0)
+			{
+				continue;
+			}
 			int px = hx;
 			int py = hy + 1;
 			if (py >= (int)W.height || WB[px, py] > 0)
@@ -2321,10 +2254,6 @@ D(c, "beartrap", 0.1f * totalTrapRarity, 0.2f * totalTrapRarity, -0.5f, 1f);
 			GameObject structObj = GetStructObj(name);
 			float num7 = Random.Range(yOff - yDev, yOff + yDev);
 			GameObject val3 = Object.Instantiate<GameObject>(structObj, (Vector2)(val - val2 * num7), Quaternion.Euler(0f, 0f, Random.Range(0f - rot, rot)));
-			if (name == "geyser")
-			{
-				Plugin.Log.LogInfo((object)("[CS] geyser placed at " + (Vector2)(val - val2 * num7) + " (blockCenter=" + val + " yOff=" + num7 + " dir=" + val2 + " hx=" + hx + " hy=" + hy + ")"));
-			}
 			diagEntityCount++;
 			Rigidbody2D spawnRb = val3.GetComponent<Rigidbody2D>();
 			if ((Object)(object)spawnRb != (Object)null && IsSimulatableLoot(spawnRb) && !colliderOn[c.x, c.y])

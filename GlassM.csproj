@@ -12,6 +12,9 @@
   <PropertyGroup Condition="'$(Configuration)'=='Release'">
     <DefineConstants>$(DefineConstants);PUBLIC_BUILD</DefineConstants>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'!='Release'">
+    <DefineConstants>$(DefineConstants);DIAG</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
     <Reference Include="BepInEx">
       <HintPath>C:\Users\Administrator\Desktop\work\Cu-SaveManager-main\references\BepInEx.dll</HintPath>

@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using HarmonyLib;
 using UnityEngine;
+using UnityEngine.Tilemaps;
 using UnityObject = UnityEngine.Object;
 
 namespace GlassM;
@@ -17,6 +18,9 @@ public static class Patches
 	private static Func<bool> mpRunningCheck;
 
 	private static bool mpCheckDone;
+
+	private static readonly System.Reflection.FieldInfo WorldBlocksField =
+		AccessTools.Field(typeof(WorldGeneration), "worldBlocks");
 
 	private static bool IsMultiplayerRunning()
 	{
@@ -70,46 +74,46 @@ public static class Patches
 	{
 		if ((int)__instance.biomeOverride > 0)
 		{
-			Plugin.Log.LogInfo((object)("CS: override scene " + (object)__instance.biomeOverride + ", vanilla pipeline"));
+			Plugin.Diag((object)("CS: override scene " + (object)__instance.biomeOverride + ", vanilla pipeline"));
 			ChunkStreamer.Active = false;
 			ChunkStreamer.OnClear();
-			Plugin.Log.LogInfo((object)("CS: override cleared, returning true, biomeOverride=" + (object)__instance.biomeOverride));
+			Plugin.Diag((object)("CS: override cleared, returning true, biomeOverride=" + (object)__instance.biomeOverride));
 			return true;
 		}
-		Plugin.Log.LogInfo((object)("CS: normal mode biome=" + __instance.biomeDepth));
+		Plugin.Diag((object)("CS: normal mode biome=" + __instance.biomeDepth));
 		try
 		{
-			Plugin.Log.LogInfo((object)"CS: calling OnNewWorld");
+			Plugin.Diag((object)"CS: calling OnNewWorld");
 			ChunkStreamer.OnNewWorld(__instance);
-			Plugin.Log.LogInfo((object)"CS: OnNewWorld done");
+			Plugin.Diag((object)"CS: OnNewWorld done");
 		}
 		catch (Exception ex2)
 		{
-			Plugin.Log.LogError((object)("CS: OnNewWorld failed: " + ex2));
+			Plugin.Log.LogError((object)("GlassM: OnNewWorld failed: " + ex2));
 			__result = EmptyCoroutine();
 			return false;
 		}
 		try
 		{
-			Plugin.Log.LogInfo((object)"CS: calling InitTerrain");
+			Plugin.Diag((object)"CS: calling InitTerrain");
 			ChunkStreamer.InitTerrain(__instance);
-			Plugin.Log.LogInfo((object)"CS: InitTerrain done");
+			Plugin.Diag((object)"CS: InitTerrain done");
 		}
 		catch (Exception ex3)
 		{
-			Plugin.Log.LogError((object)("CS: InitTerrain failed: " + ex3));
+			Plugin.Log.LogError((object)("GlassM: InitTerrain failed: " + ex3));
 			__result = EmptyCoroutine();
 			return false;
 		}
 		try
 		{
-			Plugin.Log.LogInfo((object)"CS: calling GenerateInitial");
+			Plugin.Diag((object)"CS: calling GenerateInitial");
 			ChunkStreamer.GenerateInitial();
-			Plugin.Log.LogInfo((object)("CS: GenerateInitial done, queue=" + ChunkStreamer.QueueCount));
+			Plugin.Diag((object)("CS: GenerateInitial done, queue=" + ChunkStreamer.QueueCount));
 		}
 		catch (Exception ex4)
 		{
-			Plugin.Log.LogError((object)("CS: GenerateInitial failed: " + ex4));
+			Plugin.Log.LogError((object)("GlassM: GenerateInitial failed: " + ex4));
 			__result = EmptyCoroutine();
 			return false;
 		}
@@ -126,12 +130,12 @@ public static class Patches
 	[HarmonyPrefix]
 	private static bool UpdateWorld_Prefix()
 	{
-		Plugin.Log.LogInfo((object)("CS: UpdateWorld called, Active=" + ChunkStreamer.Active));
+		Plugin.Diag((object)("CS: UpdateWorld called, Active=" + ChunkStreamer.Active));
 		if (!ChunkStreamer.Active)
 		{
 			return true;
 		}
-		Plugin.Log.LogInfo((object)"CS: UpdateWorld skipped");
+		Plugin.Diag((object)"CS: UpdateWorld skipped");
 		return false;
 	}
 
@@ -139,12 +143,12 @@ public static class Patches
 	[HarmonyPrefix]
 	private static bool WorldPlaceEntities_Prefix(ref IEnumerator __result)
 	{
-		Plugin.Log.LogInfo((object)("CS: WorldPlaceEntities called, Active=" + ChunkStreamer.Active));
+		Plugin.Diag((object)("CS: WorldPlaceEntities called, Active=" + ChunkStreamer.Active));
 		if (!ChunkStreamer.Active)
 		{
 			return true;
 		}
-		Plugin.Log.LogInfo((object)"CS: WorldPlaceEntities skipped");
+		Plugin.Diag((object)"CS: WorldPlaceEntities skipped");
 		__result = EmptyCoroutine();
 		return false;
 	}
@@ -161,6 +165,42 @@ public static class Patches
 	private static void Update_Postfix()
 	{
 		ChunkStreamer.Tick();
+	}
+
+	[HarmonyPatch(typeof(WorldGeneration), "GenerateObjectAtPosFast")]
+	[HarmonyPrefix]
+	private static bool GenerateObjectAtPosFast_Prefix(WorldGeneration __instance, Vector2Int pos, Tilemap tilemap)
+	{
+		TileBase[] tiles = __instance.tiles;
+		Tile special = __instance.specialNullTile;
+		ushort[,] blocks = (ushort[,])WorldBlocksField.GetValue(__instance);
+		Dictionary<TileBase, ushort> map = new Dictionary<TileBase, ushort>();
+		for (int i = 0; i < tiles.Length; i++)
+		{
+			TileBase key = tiles[i] ?? special;
+			if (!map.ContainsKey(key))
+			{
+				map.Add(key, (ushort)i);
+			}
+		}
+		for (int j = tilemap.cellBounds.xMin; j < tilemap.cellBounds.xMax; j++)
+		{
+			for (int k = tilemap.cellBounds.yMin; k < tilemap.cellBounds.yMax; k++)
+			{
+				TileBase t = tilemap.GetTile(new Vector3Int(j, k));
+				ushort v;
+				if (t == special)
+				{
+					v = 0;
+				}
+				else if (!map.TryGetValue(t ?? special, out v))
+				{
+					v = 0;
+				}
+				blocks[pos.x + j, pos.y + k] = v;
+			}
+		}
+		return false;
 	}
 
 	[HarmonyPatch(typeof(Body), "PlaceBody")]
