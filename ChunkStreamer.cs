@@ -61,6 +61,10 @@ public static class ChunkStreamer
 
 	private static readonly bool[,] dirtyRender = new bool[16, 16];
 
+	private static int CW => (int)W.chunkWidth;
+
+	private static int CHt => (int)W.chunkHeight;
+
 	private static readonly List<Vector2Int> queue = new List<Vector2Int>();
 
 	private static readonly List<Vector2Int> pendingFull = new List<Vector2Int>();
@@ -78,8 +82,6 @@ public static class ChunkStreamer
 	private static System.Reflection.FieldInfo f_netBodyAll;
 
 	private static bool mpNetBodyChecked;
-
-	private static readonly System.Random terrainRng = new System.Random(12345);
 
 	public const int GEN_RADIUS = 3;
 
@@ -137,17 +139,17 @@ public static class ChunkStreamer
 
 	private static float R(float min, float max)
 	{
-		return (float)((double)min + (double)(max - min) * terrainRng.NextDouble());
+		return Random.Range(min, max);
 	}
 
 	private static float RV()
 	{
-		return (float)terrainRng.NextDouble();
+		return Random.value;
 	}
 
 	private static int RI(int min, int max)
 	{
-		return terrainRng.Next(min, max);
+		return Random.Range(min, max);
 	}
 
 	public static void OnNewWorld(WorldGeneration w)
@@ -185,7 +187,7 @@ public static class ChunkStreamer
 
 	private static bool InWorld(Vector2Int c)
 	{
-		return c.x >= 0 && c.y >= 0 && c.x < 16 && c.y < 16;
+		return c.x >= 0 && c.y >= 0 && c.x < CW && c.y < CHt;
 	}
 
 	public static void InitTerrain(WorldGeneration w)
@@ -307,9 +309,9 @@ public static class ChunkStreamer
 	private static void FullDataFill()
 	{
 		ushort[,] array = new ushort[CS, CS];
-		for (int i = 0; i < 16; i++)
+		for (int i = 0; i < CW; i++)
 		{
-			for (int j = 0; j < 16; j++)
+			for (int j = 0; j < CHt; j++)
 			{
 				GenChunkTerrainInto(new Vector2Int(i, j), array);
 				int num = i * CS;
@@ -449,7 +451,7 @@ public static class ChunkStreamer
 			if (PlayerCamera.main != null && PlayerCamera.main.body != null)
 			{
 				Vector3 val = PlayerCamera.main.body.transform.position;
-				mpPlayerChunks.Add(new Vector2Int(Mathf.Clamp((int)(val.x + 512f) / CS, 0, 15), Mathf.Clamp((int)(val.y + 512f) / CS, 0, 15)));
+				mpPlayerChunks.Add(new Vector2Int(Mathf.Clamp((int)(val.x + W.halfWidth) / CS, 0, CW - 1), Mathf.Clamp((int)(val.y + W.halfHeight) / CS, 0, CHt - 1)));
 			}
 		}
 		catch
@@ -473,7 +475,7 @@ public static class ChunkStreamer
 						if ((Object)(object)component != (Object)null && (Object)(object)component.transform != (Object)null)
 						{
 							Vector3 val2 = component.transform.position;
-							mpPlayerChunks.Add(new Vector2Int(Mathf.Clamp((int)(val2.x + 512f) / CS, 0, 15), Mathf.Clamp((int)(val2.y + 512f) / CS, 0, 15)));
+							mpPlayerChunks.Add(new Vector2Int(Mathf.Clamp((int)(val2.x + W.halfWidth) / CS, 0, CW - 1), Mathf.Clamp((int)(val2.y + W.halfHeight) / CS, 0, CHt - 1)));
 						}
 					}
 				}
@@ -552,16 +554,12 @@ public static class ChunkStreamer
 		{
 			return;
 		}
-		if (Time.fixedDeltaTime != 0.03f)
-		{
-			Time.fixedDeltaTime = 0.03f;
-		}
 		CollectPlayers();
 		Vector2Int pc = PlayerChunk;
 		try
 		{
 			Vector3 val = (((Object)(object)WorldGeneration.world != (Object)null && (Object)(object)PlayerCamera.main != (Object)null && (Object)(object)PlayerCamera.main.body != (Object)null) ? ((Component)PlayerCamera.main.body).transform.position : Vector3.zero);
-			pc = new Vector2Int(Mathf.Clamp((int)(val.x + 512f) / CS, 0, 15), Mathf.Clamp((int)(val.y + 512f) / CS, 0, 15));
+			pc = new Vector2Int(Mathf.Clamp((int)(val.x + W.halfWidth) / CS, 0, CW - 1), Mathf.Clamp((int)(val.y + W.halfHeight) / CS, 0, CHt - 1));
 			if (pc != lastPlayerChunk)
 			{
 				Vector2Int val2 = pc - lastPlayerChunk;
@@ -582,7 +580,7 @@ public static class ChunkStreamer
 				{
 					for (int j = ppc.y - GEN_RADIUS; j <= ppc.y + GEN_RADIUS; j++)
 					{
-						if (i >= 0 && j >= 0 && i <= 15 && j <= 15 && !genData[i, j] && !inQueue[i, j])
+						if (i >= 0 && j >= 0 && i < CW && j < CHt && !genData[i, j] && !inQueue[i, j])
 						{
 							queue.Add(new Vector2Int(i, j));
 							inQueue[i, j] = true;
@@ -634,9 +632,9 @@ public static class ChunkStreamer
 		if (scanKey != lastScanKey)
 		{
 			lastScanKey = scanKey;
-			for (int m = 0; m < 16; m++)
+			for (int m = 0; m < CW; m++)
 			{
-				for (int n = 0; n < 16; n++)
+				for (int n = 0; n < CHt; n++)
 				{
 					if (!genData[m, n])
 					{
@@ -690,7 +688,7 @@ public static class ChunkStreamer
 		{
 			for (int n2 = pc.y - RENDER_RADIUS; n2 <= pc.y + RENDER_RADIUS; n2++)
 			{
-				if (m2 >= 0 && n2 >= 0 && m2 < 16 && n2 < 16 && dirtyRender[m2, n2] && genApplied[m2, n2])
+				if (m2 >= 0 && n2 >= 0 && m2 < CW && n2 < CHt && dirtyRender[m2, n2] && genApplied[m2, n2])
 				{
 					RenderChunk(new Vector2Int(m2, n2));
 				}
@@ -920,7 +918,7 @@ public static class ChunkStreamer
 		{
 			for (int j = c.y - 2; j <= c.y + 2; j++)
 			{
-				if (i >= 0 && j >= 0 && i <= 15 && j <= 15 && genApplied[i, j])
+				if (i >= 0 && j >= 0 && i < CW && j < CHt && genApplied[i, j])
 				{
 					RenderChunk(new Vector2Int(i, j), force: true);
 				}

@@ -7,7 +7,7 @@ using UnityEngine;
 
 namespace GlassM;
 
-[BepInPlugin("com.cu.glassm", "GlassM", "0.1.3")]
+[BepInPlugin("com.cu.glassm", "GlassM", "0.1.4")]
 public sealed class Plugin : BaseUnityPlugin
 {
 	internal static ManualLogSource Log;
